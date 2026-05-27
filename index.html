@@ -1,12 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
-  </head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Ardee Engineering – Project Tracker Pro v3</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Exo+2:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 <script id="__EMBEDDED_STATE__" type="application/json">null</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -1118,20 +1117,6 @@ hr.div{border:none;border-top:1px solid var(--border);margin:14px 0}
 <div id="toastContainer"></div>
 
 <script>
-// Firebase loaded via window globals (compatible with non-module script)
-
-const _fbApp = firebase.initializeApp({
-  apiKey: "AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
-  authDomain: "work-progress-app-b1939.firebaseapp.com",
-  projectId: "work-progress-app-b1939",
-  storageBucket: "work-progress-app-b1939.firebasestorage.app",
-  messagingSenderId: "1035302891236",
-  appId: "1:1035302891236:web:8e4c6e5f0462a037a9c6f1",
-  databaseURL: "https://work-progress-app-b1939-default-rtdb.firebaseio.com"
-});
-const _db = firebase.database();
-let _fbReady = false;
-let _lastRemoteSave = 0;
 // ════════════════════════════════════════════════════════════
 // IMAGES
 // ════════════════════════════════════════════════════════════
@@ -1141,6 +1126,25 @@ const PHOTO='/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwY
 // ════════════════════════════════════════════════════════════
 // STATE (localStorage persisted — blank by default)
 // ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+// FIREBASE REAL-TIME SYNC (compat SDK — works without type="module")
+// ════════════════════════════════════════════════════════════
+const _fbConfig={
+  apiKey:"AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
+  authDomain:"work-progress-app-b1939.firebaseapp.com",
+  projectId:"work-progress-app-b1939",
+  storageBucket:"work-progress-app-b1939.firebasestorage.app",
+  messagingSenderId:"1035302891236",
+  appId:"1:1035302891236:web:8e4c6e5f0462a037a9c6f1",
+  databaseURL:"https://work-progress-app-b1939-default-rtdb.firebaseio.com"
+};
+let _fbApp,_db,_fbReady=false,_fbListener=null;
+try{
+  _fbApp=firebase.initializeApp(_fbConfig);
+  _db=firebase.database();
+  console.log('Firebase initialised ✅');
+}catch(e){console.warn('Firebase init failed:',e.message);}
+
 const PROJECTS_KEY='ardee_projects_v1'; // master project list
 let STATE_KEY='ardee_v3';  // active project key (changes on project select)
 let ACTIVE_PROJECT_ID=null; // currently selected project ID
@@ -1287,25 +1291,19 @@ function loadS(){
 
 function saveS(){
   try{
-    S._savedAt = Date.now();
-    // Always save locally first (instant)
-    localStorage.setItem(STATE_KEY, JSON.stringify(S));
-    // Then push to Firebase (real-time sync to all devices)
-    if(_fbReady){
-      const saveData = JSON.parse(JSON.stringify(S));
-      // Remove base64 photos before Firebase save (too large)
-      if(saveData.photos){
-        Object.keys(saveData.photos).forEach(folder => {
-          if(saveData.photos[folder]) saveData.photos[folder] = saveData.photos[folder].map(p => ({...p, data: ''}));
-        });
-      }
-      if(saveData.dwgFiles){
-        Object.keys(saveData.dwgFiles).forEach(k => { saveData.dwgFiles[k] = {fileName: saveData.dwgFiles[k]?.fileName || ''}; });
-      }
-      _db.ref('projects/'+STATE_KEY).set(sd).catch(e=>console.warn('FB:',e));
-        .catch(e => console.warn('Firebase save error:', e));
+    S._savedAt=Date.now();
+    localStorage.setItem(STATE_KEY,JSON.stringify(S));
+    // Sync to Firebase (strip large binary data to stay within free tier limits)
+    if(_fbReady&&_db){
+      try{
+        const sd=JSON.parse(JSON.stringify(S));
+        // Strip photos and drawing files (base64 — too large for Firebase free tier)
+        if(sd.photos){Object.keys(sd.photos).forEach(f=>{if(sd.photos[f])sd.photos[f]=sd.photos[f].map(p=>({...p,data:''}));});}
+        if(sd.dwgFiles){Object.keys(sd.dwgFiles).forEach(k=>{sd.dwgFiles[k]={fileName:sd.dwgFiles[k]?.fileName||''};});}
+        _db.ref('projects/'+STATE_KEY).set(sd).catch(e=>console.warn('FB sync error:',e));
+      }catch(fe){console.warn('FB saveS error:',fe);}
     }
-  }catch(e){toast('⚠️ Storage error.',1);}
+  }catch(e){toast('⚠️ Storage full. Consider clearing old data.',1);}
 }
 S=loadS()||defaultState();
 
@@ -2138,6 +2136,8 @@ function selectProject(projId){
   const rb=document.getElementById('resetBtn');if(rb)rb.style.display='none';
   document.getElementById('lUser').value='';
   document.getElementById('lPass').value='';
+  // Re-attach Firebase listener to the selected project
+  if(_fbReady&&_db)attachFbListener(STATE_KEY);
   // Show login screen
   document.getElementById('projectScreen').style.display='none';
   document.getElementById('loginScreen').style.display='block';
@@ -4269,6 +4269,40 @@ function filterTbl(tbodyId,val){
 // ════════════════════════════════════════════════════════════
 // INIT
 // ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+// FIREBASE LISTENER — attaches/re-attaches on project change
+// ════════════════════════════════════════════════════════════
+function startFbListener(){
+  if(!_db){console.warn('Firebase not ready — running offline.');return;}
+  _fbReady=true;
+  attachFbListener(STATE_KEY);
+}
+
+function attachFbListener(key){
+  // Detach previous listener if any
+  if(_fbListener){try{_db.ref('projects/'+_fbListener).off('value');}catch(e){}}
+  _fbListener=key;
+  _db.ref('projects/'+key).on('value',function(snapshot){
+    try{
+      const rd=snapshot.val();
+      if(!rd||typeof rd!=='object')return;
+      const rt=rd._savedAt||0;
+      const lt=S._savedAt||0;
+      // Only update if Firebase data is newer AND not from this device's last save (2s buffer)
+      if(rt>lt&&(Date.now()-rt)>2000){
+        S=rd;
+        // Ensure admin credentials always valid after remote update
+        if(typeof fixCredsPublic==='function')S=fixCredsPublic(S);
+        localStorage.setItem(key,JSON.stringify(S));
+        if(CU){
+          renderAll();
+          toast('🔄 Data synced from another user');
+        }
+      }
+    }catch(e){console.warn('FB onValue error:',e);}
+  });
+}
+
 window.onload=function(){
   document.getElementById('lLogo').src='data:image/jpeg;base64,'+LOGO;
   document.getElementById('hLogo').src='data:image/jpeg;base64,'+LOGO;
@@ -4278,24 +4312,9 @@ window.onload=function(){
   if(lLogo2)lLogo2.src='data:image/jpeg;base64,'+LOGO;
   // Init project selection screen
   initProjectScreen();
-  // Firebase real-time sync
-  _fbReady = true;
-  _db.ref('projects/ardee_v3').on('value',(snapshot)=>{
-    const remoteData = snapshot.val();
-    if(!remoteData) return;
-    const remoteTime = remoteData._savedAt || 0;
-    const localTime = S._savedAt || 0;
-    // Only update if remote data is newer AND we didn't just save it ourselves
-    if(remoteTime > localTime && (Date.now() - remoteTime) > 2000){
-      S = remoteData;
-      localStorage.setItem(STATE_KEY, JSON.stringify(S));
-      // If user is logged in, refresh screens
-      if(CU){
-        renderAll();
-        toast('🔄 Data synced from another user');
-      }
-    }
-  });
+  // Start Firebase real-time listener after a short delay
+  // (ensures STATE_KEY is set and local state is ready)
+  setTimeout(startFbListener, 800);
 };
 </script>
 </body>
