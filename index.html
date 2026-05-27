@@ -1388,51 +1388,53 @@ function doLogin(){
   // Hide login overlay
   document.getElementById('loginOv').style.display='none';
   document.getElementById('lErr').style.display='none';
-  // On login — fetch latest from Firebase once to ensure fresh data
+  // On login — ALWAYS fetch fresh data from Firebase before rendering
+  // This ensures this device has the latest data even if localStorage was stale
   if(_db&&STATE_KEY){
     _db.ref('projects/'+STATE_KEY).once('value').then(function(snap){
       const rd=snap.val();
-      if(rd&&typeof rd==='object'){
-        const rt=rd._savedAt||0;
-        const lt=S._savedAt||0;
-        if(rt>lt){
-          if(typeof fixCredsPublic==='function')S=fixCredsPublic(rd);
-          else S=rd;
-          localStorage.setItem(STATE_KEY,JSON.stringify(S));
-          console.log('Login sync: loaded latest data from Firebase ✅');
-        }
+      if(rd&&typeof rd==='object'&&rd._savedAt){
+        console.log('Login: applying Firebase data ✅');
+        if(typeof fixCredsPublic==='function')S=fixCredsPublic(rd);
+        else S=rd;
+        localStorage.setItem(STATE_KEY,JSON.stringify(S));
       }
-    }).catch(function(e){console.warn('Login Firebase fetch failed:',e.message);});
+      // Apply header UI + render with fresh Firebase data
+      _applyLoginUI(CU);
+      applyPermissions();
+      renderAll();
+      addLog('LOGIN',CU.name+' logged in');
+    }).catch(function(e){
+      console.warn('Login Firebase fetch failed (offline?):', e.message);
+      _applyLoginUI(CU);
+      applyPermissions();
+      renderAll();
+      addLog('LOGIN',CU.name+' logged in (offline)');
+    });
+    return; // rendering happens inside promise — skip fallback below
   }
-  // Update header
+  // Fallback render (when Firebase not available — offline mode)
+  _applyLoginUI(u);
+  applyPermissions();
+  renderAll();
+  addLog('LOGIN',u.name+' logged in (local)');
+}
+
+function _applyLoginUI(u){
   document.getElementById('hUserName').textContent=u.name+' ['+u.id+']';
   const hSub=document.querySelector('.h-titles p');
   if(hSub&&S.project?.name)hSub.textContent=S.project.name+' — Data-Driven';
   document.getElementById('navUsers').style.display=u.perms.admin?'':'none';
   document.getElementById('hDate').textContent=new Date().toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
   ['r-date','f-date','e-date'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=today();});
-  applyPermissions();
-  renderAll();
-  addLog('LOGIN',u.name+' logged in');
 }
 
-// Load project state from localStorage using current STATE_KEY (ignores embedded state)
+// Load project state — localStorage only (Firebase is loaded async via listener)
 function loadProjectState(){
   try{
     const d=localStorage.getItem(STATE_KEY);
-    if(d){
-      const p=JSON.parse(d);
-      if(p&&typeof p==='object'){
-        return fixCredsPublic(p);
-      }
-    }
+    if(d){const p=JSON.parse(d);if(p&&typeof p==='object')return fixCredsPublic(p);}
   }catch(e){console.warn('loadProjectState error:',e);}
-  // Fallback: try embedded state
-  try{
-    const embTag=document.getElementById('__EMBEDDED_STATE__');
-    if(embTag){const et=embTag.textContent.trim();
-      if(et&&et!=='null'){const p=JSON.parse(et);if(p&&p.version)return fixCredsPublic(p);}}
-  }catch(e){}
   return null;
 }
 
@@ -4332,32 +4334,31 @@ function attachFbListener(key){
       const rd=snapshot.val();
       if(!rd||typeof rd!=='object')return;
       const rt=rd._savedAt||0;
-      const lt=S?._savedAt||0;
       const now=Date.now();
 
-      // Ignore if this is our own save echoing back (within 5 seconds)
-      if(rt>0&&(now-_lastSelfSave)<5000&&rt>=_lastSelfSave-100)return;
+      // Skip echo: ignore if WE just saved this exact timestamp (within 4 seconds)
+      const isOwnEcho=(rt>0&&rt===_lastSelfSave&&(now-_lastSelfSave)<4000);
+      if(isOwnEcho){console.log('FB: skipping own echo');return;}
 
-      // Accept if Firebase has newer data than what we have locally
-      if(rt>lt){
-        console.log('FB sync: remote data newer ('+new Date(rt).toLocaleTimeString()+'), updating...');
-        // Ensure admin creds always intact
-        if(typeof fixCredsPublic==='function')S=fixCredsPublic(rd);
-        else S=rd;
-        localStorage.setItem(key,JSON.stringify(S));
-        // If user is logged in — refresh the UI
-        if(CU){
-          renderAll();
-          toast('🔄 Synced — updated by '+( rd.logs?.[0]?.user||'another user'));
-        } else {
-          // Not logged in yet — data loaded for login validation
-          console.log('FB data loaded — ready for login');
-        }
+      // ALWAYS apply Firebase data — it is the single source of truth
+      // localStorage is just a cache; Firebase always wins
+      console.log('FB: applying data saved at '+new Date(rt).toLocaleTimeString());
+      if(typeof fixCredsPublic==='function')S=fixCredsPublic(rd);
+      else S=rd;
+      localStorage.setItem(key,JSON.stringify(S));
+
+      if(CU){
+        // User logged in — refresh UI and notify
+        renderAll();
+        const lastUser=rd.logs&&rd.logs.length?rd.logs[0].user:'another user';
+        toast('🔄 Live update from '+lastUser);
+      } else {
+        // Not logged in yet — data ready for login credential check
+        console.log('FB: data loaded pre-login, ready for auth');
       }
     }catch(e){console.warn('FB onValue error:',e);}
   },function(err){
     console.warn('FB listener error:',err.message);
-    // Show offline indicator
     const ind=document.getElementById('fbStatusDot');
     if(ind){ind.style.background='#ff1744';ind.title='Firebase offline';}
   });
