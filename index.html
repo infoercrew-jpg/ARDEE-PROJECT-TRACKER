@@ -1114,22 +1114,7 @@ hr.div{border:none;border-top:1px solid var(--border);margin:14px 0}
 
 <div id="toastContainer"></div>
 
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js";
-import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-database.js";
-
-const _fbApp = initializeApp({
-  apiKey: "AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
-  authDomain: "work-progress-app-b1939.firebaseapp.com",
-  projectId: "work-progress-app-b1939",
-  storageBucket: "work-progress-app-b1939.firebasestorage.app",
-  messagingSenderId: "1035302891236",
-  appId: "1:1035302891236:web:8e4c6e5f0462a037a9c6f1",
-  databaseURL: "https://work-progress-app-b1939-default-rtdb.firebaseio.com"
-});
-const _db = getDatabase(_fbApp);
-let _fbReady = false;
-let _lastRemoteSave = 0;
+<script>
 // ════════════════════════════════════════════════════════════
 // IMAGES
 // ════════════════════════════════════════════════════════════
@@ -1285,25 +1270,9 @@ function loadS(){
 
 function saveS(){
   try{
-    S._savedAt = Date.now();
-    // Always save locally first (instant)
-    localStorage.setItem(STATE_KEY, JSON.stringify(S));
-    // Then push to Firebase (real-time sync to all devices)
-    if(_fbReady){
-      const saveData = JSON.parse(JSON.stringify(S));
-      // Remove base64 photos before Firebase save (too large)
-      if(saveData.photos){
-        Object.keys(saveData.photos).forEach(folder => {
-          if(saveData.photos[folder]) saveData.photos[folder] = saveData.photos[folder].map(p => ({...p, data: ''}));
-        });
-      }
-      if(saveData.dwgFiles){
-        Object.keys(saveData.dwgFiles).forEach(k => { saveData.dwgFiles[k] = {fileName: saveData.dwgFiles[k]?.fileName || ''}; });
-      }
-      set(ref(_db, 'projects/' + STATE_KEY), saveData)
-        .catch(e => console.warn('Firebase save error:', e));
-    }
-  }catch(e){toast('⚠️ Storage error.',1);}
+    S._savedAt=Date.now();
+    localStorage.setItem(STATE_KEY,JSON.stringify(S));
+  }catch(e){toast('⚠️ Storage full. Consider clearing old data.',1);}
 }
 S=loadS()||defaultState();
 
@@ -4276,24 +4245,6 @@ window.onload=function(){
   if(lLogo2)lLogo2.src='data:image/jpeg;base64,'+LOGO;
   // Init project selection screen
   initProjectScreen();
-  // Firebase real-time sync
-  _fbReady = true;
-  onValue(ref(_db, 'projects/' + 'ardee_v3'), (snapshot) => {
-    const remoteData = snapshot.val();
-    if(!remoteData) return;
-    const remoteTime = remoteData._savedAt || 0;
-    const localTime = S._savedAt || 0;
-    // Only update if remote data is newer AND we didn't just save it ourselves
-    if(remoteTime > localTime && (Date.now() - remoteTime) > 2000){
-      S = remoteData;
-      localStorage.setItem(STATE_KEY, JSON.stringify(S));
-      // If user is logged in, refresh screens
-      if(CU){
-        renderAll();
-        toast('🔄 Data synced from another user');
-      }
-    }
-  });
 };
 </script>
 </body>
