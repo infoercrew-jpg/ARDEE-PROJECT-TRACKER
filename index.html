@@ -1297,19 +1297,50 @@ function loadS(){
 function saveS(){
   try{
     S._savedAt=Date.now();
+    // 1. Always save locally first (instant, works offline)
     localStorage.setItem(STATE_KEY,JSON.stringify(S));
-    // Sync to Firebase (strip large binary data to stay within free tier limits)
-    if(_fbReady&&_db){
-      try{
-        _lastSelfSave=S._savedAt; // mark our own save timestamp to ignore echo
-        const sd=JSON.parse(JSON.stringify(S));
-        // Strip large binary data (photos/PDFs) — keeps Firebase within free tier limits
-        if(sd.photos){Object.keys(sd.photos).forEach(f=>{if(sd.photos[f])sd.photos[f]=sd.photos[f].map(p=>({...p,data:''}));});}
-        if(sd.dwgFiles){Object.keys(sd.dwgFiles).forEach(k=>{sd.dwgFiles[k]={fileName:sd.dwgFiles[k]?.fileName||''};});}
-        _db.ref('projects/'+STATE_KEY).set(sd).catch(e=>console.warn('FB sync error:',e));
-      }catch(fe){console.warn('FB saveS error:',fe);}
-    }
+    // 2. Push to Firebase — try even if _fbReady not set yet
+    _pushToFirebase();
   }catch(e){toast('⚠️ Storage full. Consider clearing old data.',1);}
+}
+
+function _pushToFirebase(){
+  // Init Firebase if not done yet
+  if(!_db){_initFirebase();}
+  if(!_db){
+    // Firebase unavailable — show offline dot
+    _setFbDot(false);
+    return;
+  }
+  try{
+    _lastSelfSave=S._savedAt;
+    const sd=JSON.parse(JSON.stringify(S));
+    // Strip base64 photos/PDFs — too large for Firebase free tier
+    if(sd.photos){Object.keys(sd.photos).forEach(function(f){
+      if(sd.photos[f])sd.photos[f]=sd.photos[f].map(function(p){return{...p,data:''};});
+    });}
+    if(sd.dwgFiles){Object.keys(sd.dwgFiles).forEach(function(k){
+      sd.dwgFiles[k]={fileName:sd.dwgFiles[k]?.fileName||''};
+    });}
+    _db.ref('projects/'+STATE_KEY).set(sd)
+      .then(function(){
+        console.log('✅ Firebase saved at '+new Date(sd._savedAt).toLocaleTimeString());
+        _setFbDot(true);
+      })
+      .catch(function(e){
+        console.warn('❌ Firebase save failed:',e.message);
+        _setFbDot(false);
+        // Show warning once per session
+        if(!window._fbErrShown){window._fbErrShown=true;toast('⚠️ Firebase sync failed — check Rules & internet',1);}
+      });
+  }catch(fe){console.warn('_pushToFirebase error:',fe);}
+}
+
+function _setFbDot(online){
+  const dot=document.getElementById('fbStatusDot');
+  const lbl=document.getElementById('fbStatusLbl');
+  if(dot)dot.style.background=online?'#00e676':'#ff1744';
+  if(lbl)lbl.textContent=online?'LIVE':'OFFLINE';
 }
 S=loadS()||defaultState();
 
@@ -2093,20 +2124,17 @@ function renderDashCharts(){
 // MULTI-PROJECT SYSTEM
 // ════════════════════════════════════════════════════════════
 
-// Load all projects from localStorage
+// Load all projects from localStorage (Firebase sync happens in initProjectScreen)
 function loadProjects(){
   try{
     const d=localStorage.getItem(PROJECTS_KEY);
     if(d){const p=JSON.parse(d);if(Array.isArray(p)&&p.length)return p;}
   }catch(e){}
-  // Default: one project using the legacy key
-  const legacy=localStorage.getItem('ardee_v3');
-  const legacyState=legacy?JSON.parse(legacy):null;
+  // Default: one project using fixed key 'ardee_v3' — same on ALL devices
   const defaultProj=[{
     id:'ardee_v3',
-    name:legacyState?.project?.name||'Default Project',
-    client:legacyState?.project?.client||'',
-    location:legacyState?.project?.location||'',
+    name:'Default Project',
+    client:'',location:'',
     created:Date.now(),
     stateKey:'ardee_v3'
   }];
@@ -2114,9 +2142,34 @@ function loadProjects(){
   return defaultProj;
 }
 
+// Sync project list from Firebase — ensures all devices see same projects
+function syncProjectsFromFirebase(callback){
+  if(!_db){if(callback)callback();return;}
+  _db.ref('projectList').once('value').then(function(snap){
+    const fbProjects=snap.val();
+    if(fbProjects&&Array.isArray(fbProjects)&&fbProjects.length){
+      localStorage.setItem(PROJECTS_KEY,JSON.stringify(fbProjects));
+      console.log('Projects synced from Firebase:',fbProjects.length,'project(s)');
+    }
+    if(callback)callback();
+  }).catch(function(e){
+    console.warn('Could not sync projects from Firebase:',e.message);
+    if(callback)callback();
+  });
+}
+
+// Save project list to both localStorage AND Firebase
 function saveProjects(projects){
   localStorage.setItem(PROJECTS_KEY,JSON.stringify(projects));
+  // Also push project list to Firebase so other devices can discover projects
+  if(_db){
+    _db.ref('projectList').set(projects).catch(function(e){
+      console.warn('FB projectList save failed:',e.message);
+    });
+  }
 }
+
+// saveProjects defined above with Firebase sync
 
 function renderProjectList(){
   const projects=loadProjects();
@@ -2239,12 +2292,18 @@ function deleteProject(projId){
 function initProjectScreen(){
   const logo=document.getElementById('lLogo2');
   if(logo&&document.getElementById('lLogo')?.src)logo.src=document.getElementById('lLogo').src;
-  const projects=loadProjects();
-  renderProjectList();
-  // If only 1 project, auto-select it
-  if(projects.length===1){
-    selectProject(projects[0].id);
-  }
+  // Show spinner while syncing
+  const el=document.getElementById('projectList');
+  if(el)el.innerHTML='<div style="color:var(--muted);font-size:11px;text-align:center;padding:20px">🔄 Connecting to Firebase...</div>';
+  // Always sync project list from Firebase first, then render
+  syncProjectsFromFirebase(function(){
+    const projects=loadProjects();
+    renderProjectList();
+    // If only 1 project, auto-select it
+    if(projects.length===1){
+      selectProject(projects[0].id);
+    }
+  });
 }
 
 function renderAll(){
@@ -4317,8 +4376,11 @@ function startFbListener(attempt){
     return;
   }
   _fbReady=true;
+  _setFbDot(true);
   console.log('Firebase ready ✅ (attempt '+attempt+') — attaching listener to: projects/'+STATE_KEY);
   attachFbListener(STATE_KEY);
+  // Push any unsaved local changes to Firebase now that it's connected
+  if(S&&S._savedAt)_pushToFirebase();
 }
 
 function attachFbListener(key){
@@ -4379,10 +4441,10 @@ window.onload=function(){
   document.getElementById('ownerPhoto').src='data:image/jpeg;base64,'+PHOTO;
   const lLogo2=document.getElementById('lLogo2');
   if(lLogo2)lLogo2.src='data:image/jpeg;base64,'+LOGO;
-  // Init project screen first
-  initProjectScreen();
-  // Start Firebase immediately — no delay needed with compat SDK
+  // Start Firebase FIRST so _db is ready before initProjectScreen uses it
   startFbListener();
+  // Then init project screen (syncProjectsFromFirebase is called inside)
+  initProjectScreen();
 };
 </script>
 <!-- Firebase loaded at end of body to guarantee DOM + other scripts are ready -->
