@@ -1353,7 +1353,14 @@ const pct=(a,b)=>b>0?Math.min(100,Math.round(a/b*100)):0;
 const pcolor=(p)=>p>=80?'#00e676':p>=50?'#ffa726':p>=20?'#00c8ff':'#ff1744';
 const today=()=>new Date().toISOString().split('T')[0];
 const nowStr=()=>{const d=new Date();return d.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})+' '+d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});};
-function addLog(type,text){S.logs.unshift({type,text,time:nowStr(),user:CU?.id||'—'});if(S.logs.length>500)S.logs=S.logs.slice(0,500);saveS();renderLog();}
+function addLog(type,text){
+  if(!S)return;
+  S.logs=S.logs||[];
+  S.logs.unshift({type,text,time:nowStr(),user:CU?.id||'—'});
+  if(S.logs.length>500)S.logs=S.logs.slice(0,500);
+  saveS(); // saves locally + pushes to Firebase
+  if(typeof renderLog==='function')renderLog();
+}
 function toast(msg,err){
   const t=document.createElement('div');t.className='toast';
   t.style.borderColor=err?'rgba(255,23,68,.4)':'rgba(0,230,118,.3)';
@@ -1405,50 +1412,74 @@ function matchDwgNo(filename){
 function doLogin(){
   const uid=document.getElementById('lUser').value.trim();
   const pwd=document.getElementById('lPass').value;
-  // Load the correct project state first (STATE_KEY already set by selectProject)
-  // This ensures S.users reflects the selected project's user list
-  const projectState=loadProjectState();
-  if(projectState)S=projectState;
-  const u=S.users.find(x=>x.id===uid&&x.pass===pwd&&x.active!==0);
-  if(!u){
+  if(!uid||!pwd){
     document.getElementById('lErr').style.display='block';
-    const rb=document.getElementById('resetBtn');if(rb)rb.style.display='block';
     return;
   }
-  CU=u;
-  // Hide login overlay
-  document.getElementById('loginOv').style.display='none';
-  document.getElementById('lErr').style.display='none';
-  // On login — ALWAYS fetch fresh data from Firebase before rendering
-  // This ensures this device has the latest data even if localStorage was stale
-  if(_db&&STATE_KEY){
-    _db.ref('projects/'+STATE_KEY).once('value').then(function(snap){
-      const rd=snap.val();
-      if(rd&&typeof rd==='object'&&rd._savedAt){
-        console.log('Login: applying Firebase data ✅');
-        if(typeof fixCredsPublic==='function')S=fixCredsPublic(rd);
-        else S=rd;
-        localStorage.setItem(STATE_KEY,JSON.stringify(S));
-      }
-      // Apply header UI + render with fresh Firebase data
-      _applyLoginUI(CU);
-      applyPermissions();
-      renderAll();
-      addLog('LOGIN',CU.name+' logged in');
-    }).catch(function(e){
-      console.warn('Login Firebase fetch failed (offline?):', e.message);
-      _applyLoginUI(CU);
-      applyPermissions();
-      renderAll();
-      addLog('LOGIN',CU.name+' logged in (offline)');
-    });
-    return; // rendering happens inside promise — skip fallback below
+
+  // Show loading state on button
+  const btnEl=document.querySelector('#loginScreen .btn-p');
+  if(btnEl){btnEl.textContent='⏳ Loading...';btnEl.disabled=true;}
+
+  function _resetBtn(){
+    if(btnEl){btnEl.textContent='ACCESS SYSTEM →';btnEl.disabled=false;}
   }
-  // Fallback render (when Firebase not available — offline mode)
-  _applyLoginUI(u);
-  applyPermissions();
-  renderAll();
-  addLog('LOGIN',u.name+' logged in (local)');
+
+  function _tryLogin(stateData){
+    // Apply Firebase/local data into S
+    if(stateData&&typeof stateData==='object'&&stateData._savedAt){
+      S=fixCredsPublic(stateData);
+      localStorage.setItem(STATE_KEY,JSON.stringify(S));
+    } else {
+      // No Firebase data yet — ensure S is initialized
+      if(!S||!S.users)S=fixCredsPublic(S||defaultState());
+    }
+
+    // Check credentials
+    const u=S.users.find(function(x){return x.id===uid&&x.pass===pwd&&x.active!==0;});
+    if(!u){
+      _resetBtn();
+      document.getElementById('lErr').style.display='block';
+      const rb=document.getElementById('resetBtn');if(rb)rb.style.display='block';
+      return;
+    }
+
+    // ✅ Login success
+    CU=u;
+    document.getElementById('loginOv').style.display='none';
+    document.getElementById('lErr').style.display='none';
+    _resetBtn();
+    _applyLoginUI(CU);
+    applyPermissions();
+    renderAll();
+    // Log login WITHOUT triggering another Firebase push loop
+    S.logs=S.logs||[];
+    S.logs.unshift({type:'LOGIN',text:CU.name+' logged in',time:nowStr(),user:CU.id});
+    if(S.logs.length>500)S.logs=S.logs.slice(0,500);
+    localStorage.setItem(STATE_KEY,JSON.stringify(S));
+    // Silently push to Firebase without calling saveS (avoids echo)
+    if(_db)_db.ref('projects/'+STATE_KEY).set(
+      JSON.parse(JSON.stringify(S))
+    ).catch(function(e){console.warn('Login log push failed:',e);});
+    if(typeof renderLog==='function')renderLog();
+  }
+
+  // ALWAYS fetch fresh data from Firebase first, then authenticate
+  if(_db&&STATE_KEY){
+    _db.ref('projects/'+STATE_KEY).once('value')
+      .then(function(snap){
+        console.log('Login: Firebase data fetched ✅');
+        _tryLogin(snap.val());
+      })
+      .catch(function(e){
+        console.warn('Login: Firebase fetch failed, using local data:',e.message);
+        _tryLogin(null); // fall back to localStorage
+      });
+  } else {
+    // No Firebase — use localStorage only
+    console.warn('Login: Firebase not available, using local data');
+    _tryLogin(null);
+  }
 }
 
 function _applyLoginUI(u){
@@ -4398,31 +4429,32 @@ function attachFbListener(key){
       const rt=rd._savedAt||0;
       const now=Date.now();
 
-      // Skip echo: ignore if WE just saved this exact timestamp (within 4 seconds)
-      const isOwnEcho=(rt>0&&rt===_lastSelfSave&&(now-_lastSelfSave)<4000);
-      if(isOwnEcho){console.log('FB: skipping own echo');return;}
+      // Skip only our OWN echo (exact timestamp match within 3 seconds)
+      if(rt>0 && rt===_lastSelfSave && (now-_lastSelfSave)<3000){
+        console.log('FB: skipping own echo ('+rt+')');
+        return;
+      }
 
-      // ALWAYS apply Firebase data — it is the single source of truth
-      // localStorage is just a cache; Firebase always wins
-      console.log('FB: applying data saved at '+new Date(rt).toLocaleTimeString());
-      if(typeof fixCredsPublic==='function')S=fixCredsPublic(rd);
+      // Always apply — Firebase is the single source of truth
+      console.log('FB: received update saved at '+new Date(rt).toLocaleTimeString());
+      if(typeof fixCredsPublic==='function') S=fixCredsPublic(rd);
       else S=rd;
       localStorage.setItem(key,JSON.stringify(S));
+      _setFbDot(true);
 
       if(CU){
-        // User logged in — refresh UI and notify
+        // Logged in — re-render everything with fresh data
         renderAll();
-        const lastUser=rd.logs&&rd.logs.length?rd.logs[0].user:'another user';
-        toast('🔄 Live update from '+lastUser);
-      } else {
-        // Not logged in yet — data ready for login credential check
-        console.log('FB: data loaded pre-login, ready for auth');
+        const lastUser=(rd.logs&&rd.logs.length&&rd.logs[0].user!==CU.id)
+          ? '🔄 Live update from '+rd.logs[0].user
+          : '🔄 Data refreshed';
+        toast(lastUser);
       }
+      // Not logged in — data is in S ready for doLogin to use
     }catch(e){console.warn('FB onValue error:',e);}
   },function(err){
     console.warn('FB listener error:',err.message);
-    const ind=document.getElementById('fbStatusDot');
-    if(ind){ind.style.background='#ff1744';ind.title='Firebase offline';}
+    _setFbDot(false);
   });
 
   // Show online indicator
