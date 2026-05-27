@@ -4,8 +4,6 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Ardee Engineering – Project Tracker Pro v3</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Exo+2:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 <script id="__EMBEDDED_STATE__" type="application/json">null</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -1139,11 +1137,18 @@ const _fbConfig={
   databaseURL:"https://work-progress-app-b1939-default-rtdb.firebaseio.com"
 };
 let _fbApp,_db,_fbReady=false,_fbListener=null;
-try{
-  _fbApp=firebase.initializeApp(_fbConfig);
-  _db=firebase.database();
-  console.log('Firebase initialised ✅');
-}catch(e){console.warn('Firebase init failed:',e.message);}
+// Firebase is initialised in window.onload after CDN scripts are loaded
+function _initFirebase(){
+  try{
+    if(typeof firebase==='undefined'){console.warn('Firebase SDK not loaded — check internet connection.');return false;}
+    if(!_fbApp){
+      _fbApp=firebase.initializeApp(_fbConfig);
+      _db=firebase.database();
+      console.log('Firebase initialised ✅');
+    }
+    return true;
+  }catch(e){console.warn('Firebase init failed:',e.message);return false;}
+}
 
 const PROJECTS_KEY='ardee_projects_v1'; // master project list
 let STATE_KEY='ardee_v3';  // active project key (changes on project select)
@@ -1383,6 +1388,22 @@ function doLogin(){
   // Hide login overlay
   document.getElementById('loginOv').style.display='none';
   document.getElementById('lErr').style.display='none';
+  // On login — fetch latest from Firebase once to ensure fresh data
+  if(_db&&STATE_KEY){
+    _db.ref('projects/'+STATE_KEY).once('value').then(function(snap){
+      const rd=snap.val();
+      if(rd&&typeof rd==='object'){
+        const rt=rd._savedAt||0;
+        const lt=S._savedAt||0;
+        if(rt>lt){
+          if(typeof fixCredsPublic==='function')S=fixCredsPublic(rd);
+          else S=rd;
+          localStorage.setItem(STATE_KEY,JSON.stringify(S));
+          console.log('Login sync: loaded latest data from Firebase ✅');
+        }
+      }
+    }).catch(function(e){console.warn('Login Firebase fetch failed:',e.message);});
+  }
   // Update header
   document.getElementById('hUserName').textContent=u.name+' ['+u.id+']';
   const hSub=document.querySelector('.h-titles p');
@@ -4277,10 +4298,24 @@ function filterTbl(tbodyId,val){
 // Track the timestamp of our OWN last save — to ignore echo from Firebase
 let _lastSelfSave=0;
 
-function startFbListener(){
-  if(!_db){console.warn('Firebase not ready — running offline only.');return;}
+function startFbListener(attempt){
+  attempt=attempt||1;
+  if(!_initFirebase()){
+    if(attempt<=5){
+      // Firebase CDN may still be loading — retry up to 5 times, 500ms apart
+      console.log('Firebase not ready, retry '+attempt+'/5...');
+      setTimeout(function(){startFbListener(attempt+1);},500);
+      return;
+    }
+    console.warn('Firebase failed after 5 retries — running offline only.');
+    const ind=document.getElementById('fbStatusDot');
+    const lbl=document.getElementById('fbStatusLbl');
+    if(ind)ind.style.background='#ff1744';
+    if(lbl)lbl.textContent='OFFLINE';
+    return;
+  }
   _fbReady=true;
-  console.log('Firebase ready ✅ — attaching listener to: projects/'+STATE_KEY);
+  console.log('Firebase ready ✅ (attempt '+attempt+') — attaching listener to: projects/'+STATE_KEY);
   attachFbListener(STATE_KEY);
 }
 
@@ -4349,5 +4384,8 @@ window.onload=function(){
   startFbListener();
 };
 </script>
+<!-- Firebase loaded at end of body to guarantee DOM + other scripts are ready -->
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 </body>
 </html>
