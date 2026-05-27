@@ -349,7 +349,7 @@ hr.div{border:none;border-top:1px solid var(--border);margin:14px 0}
     </div>
   </div>
   <div class="h-right">
-    <div class="live-pill"><div class="live-dot"></div>LIVE</div>
+    <div class="live-pill" id="fbPill" title="Firebase sync status"><div class="live-dot" id="fbStatusDot" style="background:#ffa726"></div><span id="fbStatusLbl">CONNECTING</span></div>
     <div id="hDate"></div>
     <div style="font-size:10px;color:var(--muted)">👤 <span id="hUserName" style="color:var(--accent)">—</span></div>
     <button class="btn btn-d" style="padding:4px 10px;font-size:10px" onclick="logout()">LOGOUT</button>
@@ -1296,8 +1296,9 @@ function saveS(){
     // Sync to Firebase (strip large binary data to stay within free tier limits)
     if(_fbReady&&_db){
       try{
+        _lastSelfSave=S._savedAt; // mark our own save timestamp to ignore echo
         const sd=JSON.parse(JSON.stringify(S));
-        // Strip photos and drawing files (base64 — too large for Firebase free tier)
+        // Strip large binary data (photos/PDFs) — keeps Firebase within free tier limits
         if(sd.photos){Object.keys(sd.photos).forEach(f=>{if(sd.photos[f])sd.photos[f]=sd.photos[f].map(p=>({...p,data:''}));});}
         if(sd.dwgFiles){Object.keys(sd.dwgFiles).forEach(k=>{sd.dwgFiles[k]={fileName:sd.dwgFiles[k]?.fileName||''};});}
         _db.ref('projects/'+STATE_KEY).set(sd).catch(e=>console.warn('FB sync error:',e));
@@ -2136,8 +2137,8 @@ function selectProject(projId){
   const rb=document.getElementById('resetBtn');if(rb)rb.style.display='none';
   document.getElementById('lUser').value='';
   document.getElementById('lPass').value='';
-  // Re-attach Firebase listener to the selected project
-  if(_fbReady&&_db)attachFbListener(STATE_KEY);
+  // Re-attach Firebase listener to the correct project key
+  if(_db)attachFbListener(STATE_KEY); // attach even before login (loads data for auth)
   // Show login screen
   document.getElementById('projectScreen').style.display='none';
   document.getElementById('loginScreen').style.display='block';
@@ -4270,36 +4271,69 @@ function filterTbl(tbodyId,val){
 // INIT
 // ════════════════════════════════════════════════════════════
 // ════════════════════════════════════════════════════════════
-// FIREBASE LISTENER — attaches/re-attaches on project change
+// FIREBASE REAL-TIME SYNC — listener management
 // ════════════════════════════════════════════════════════════
+
+// Track the timestamp of our OWN last save — to ignore echo from Firebase
+let _lastSelfSave=0;
+
 function startFbListener(){
-  if(!_db){console.warn('Firebase not ready — running offline.');return;}
+  if(!_db){console.warn('Firebase not ready — running offline only.');return;}
   _fbReady=true;
+  console.log('Firebase ready ✅ — attaching listener to: projects/'+STATE_KEY);
   attachFbListener(STATE_KEY);
 }
 
 function attachFbListener(key){
-  // Detach previous listener if any
-  if(_fbListener){try{_db.ref('projects/'+_fbListener).off('value');}catch(e){}}
+  if(!_db||!key)return;
+  // Detach previous listener cleanly
+  if(_fbListener){
+    try{_db.ref('projects/'+_fbListener).off('value');}catch(e){}
+  }
   _fbListener=key;
+
   _db.ref('projects/'+key).on('value',function(snapshot){
     try{
       const rd=snapshot.val();
       if(!rd||typeof rd!=='object')return;
       const rt=rd._savedAt||0;
-      const lt=S._savedAt||0;
-      // Only update if Firebase data is newer AND not from this device's last save (2s buffer)
-      if(rt>lt&&(Date.now()-rt)>2000){
-        S=rd;
-        // Ensure admin credentials always valid after remote update
-        if(typeof fixCredsPublic==='function')S=fixCredsPublic(S);
+      const lt=S?._savedAt||0;
+      const now=Date.now();
+
+      // Ignore if this is our own save echoing back (within 5 seconds)
+      if(rt>0&&(now-_lastSelfSave)<5000&&rt>=_lastSelfSave-100)return;
+
+      // Accept if Firebase has newer data than what we have locally
+      if(rt>lt){
+        console.log('FB sync: remote data newer ('+new Date(rt).toLocaleTimeString()+'), updating...');
+        // Ensure admin creds always intact
+        if(typeof fixCredsPublic==='function')S=fixCredsPublic(rd);
+        else S=rd;
         localStorage.setItem(key,JSON.stringify(S));
+        // If user is logged in — refresh the UI
         if(CU){
           renderAll();
-          toast('🔄 Data synced from another user');
+          toast('🔄 Synced — updated by '+( rd.logs?.[0]?.user||'another user'));
+        } else {
+          // Not logged in yet — data loaded for login validation
+          console.log('FB data loaded — ready for login');
         }
       }
     }catch(e){console.warn('FB onValue error:',e);}
+  },function(err){
+    console.warn('FB listener error:',err.message);
+    // Show offline indicator
+    const ind=document.getElementById('fbStatusDot');
+    if(ind){ind.style.background='#ff1744';ind.title='Firebase offline';}
+  });
+
+  // Show online indicator
+  _db.ref('.info/connected').on('value',function(snap){
+    const ind=document.getElementById('fbStatusDot');
+    const lbl=document.getElementById('fbStatusLbl');
+    const connected=snap.val()===true;
+    if(ind){ind.style.background=connected?'#00e676':'#ff1744';}
+    if(lbl){lbl.textContent=connected?'LIVE':'OFFLINE';}
   });
 }
 
@@ -4307,14 +4341,12 @@ window.onload=function(){
   document.getElementById('lLogo').src='data:image/jpeg;base64,'+LOGO;
   document.getElementById('hLogo').src='data:image/jpeg;base64,'+LOGO;
   document.getElementById('ownerPhoto').src='data:image/jpeg;base64,'+PHOTO;
-  // Set logo on login screen 2
   const lLogo2=document.getElementById('lLogo2');
   if(lLogo2)lLogo2.src='data:image/jpeg;base64,'+LOGO;
-  // Init project selection screen
+  // Init project screen first
   initProjectScreen();
-  // Start Firebase real-time listener after a short delay
-  // (ensures STATE_KEY is set and local state is ready)
-  setTimeout(startFbListener, 800);
+  // Start Firebase immediately — no delay needed with compat SDK
+  startFbListener();
 };
 </script>
 </body>
