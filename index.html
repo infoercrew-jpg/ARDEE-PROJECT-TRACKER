@@ -1320,54 +1320,70 @@ function loadS(){
   }catch(e){console.warn('Embedded state load error:',e);}
 })();
 
+// ── SAVE & FIREBASE SYNC ─────────────────────────────────────
+let _fbPushTimer=null; // debounce timer
+
 function saveS(){
   try{
     S._savedAt=Date.now();
-    _lastSelfSave=S._savedAt; // set IMMEDIATELY so listener echo window starts now
-    // 1. Always save locally first (instant, works offline)
+    _lastSelfSave=S._savedAt;
+    // 1. Save to localStorage immediately (works offline too)
     localStorage.setItem(STATE_KEY,JSON.stringify(S));
-    // 2. Push to Firebase (skipped during batch uploads — single push at end)
-    if(!window._uploading) _pushToFirebase();
-  }catch(e){toast('⚠️ Storage full. Consider clearing old data.',1);}
+    // 2. During bulk uploads: skip — caller calls _finishUpload() at the end
+    if(window._uploading) return;
+    // 3. Debounce: wait 400ms after last save before pushing to Firebase
+    //    This batches rapid consecutive saves (e.g. multiple field updates)
+    if(_fbPushTimer) clearTimeout(_fbPushTimer);
+    _fbPushTimer=setTimeout(function(){ _fbPushTimer=null; _pushToFirebase(); }, 400);
+  }catch(e){toast('Storage full — consider clearing old data.',1);}
 }
 
-function _pushToFirebase(){
-  // Init Firebase if not done yet
-  if(!_db){_initFirebase();}
-  if(!_db){
-    // Firebase unavailable — show offline dot
-    _setFbDot(false);
-    return;
-  }
+// Call at end of every bulk upload to do ONE Firebase push
+function _finishUpload(statusElId){
+  window._uploading=false;
+  _fbPushTimer=null;
+  _pushToFirebase(statusElId);
+}
+
+function _pushToFirebase(statusElId){
+  if(!_db){ _initFirebase(); }
+  if(!_db){ _setFbDot(false); return; }
   try{
-    // _lastSelfSave already set in saveS() — don't overwrite here
+    const ts=S._savedAt;
     const sd=JSON.parse(JSON.stringify(S));
-    // Strip base64 photos/PDFs — too large for Firebase free tier
+    // Strip base64 blobs — keep Firebase under free-tier limits
     if(sd.photos){Object.keys(sd.photos).forEach(function(f){
-      if(sd.photos[f])sd.photos[f]=sd.photos[f].map(function(p){return{...p,data:''};});
+      if(sd.photos[f])sd.photos[f]=sd.photos[f].map(function(p){return Object.assign({},p,{data:''});});
     });}
     if(sd.dwgFiles){Object.keys(sd.dwgFiles).forEach(function(k){
-      sd.dwgFiles[k]={fileName:sd.dwgFiles[k]?.fileName||''};
+      sd.dwgFiles[k]={fileName:(sd.dwgFiles[k]&&sd.dwgFiles[k].fileName)||''};
     });}
+    _setFbDot(null); // orange = saving
     _db.ref('projects/'+STATE_KEY).set(sd)
       .then(function(){
-        console.log('✅ Firebase saved at '+new Date(sd._savedAt).toLocaleTimeString());
+        console.log('FB saved OK at '+new Date(ts).toLocaleTimeString());
         _setFbDot(true);
+        if(statusElId) showStatus(statusElId,'Saved to cloud at '+new Date(ts).toLocaleTimeString(),'ok');
       })
       .catch(function(e){
-        console.warn('❌ Firebase save failed:',e.message);
+        console.warn('FB save failed:',e.message);
         _setFbDot(false);
-        // Show warning once per session
-        if(!window._fbErrShown){window._fbErrShown=true;toast('⚠️ Firebase sync failed — check Rules & internet',1);}
+        var msg='Firebase sync failed: '+e.message;
+        if(statusElId) showStatus(statusElId,msg,'err');
+        else toast(msg,1);
       });
   }catch(fe){console.warn('_pushToFirebase error:',fe);}
 }
 
 function _setFbDot(online){
-  const dot=document.getElementById('fbStatusDot');
-  const lbl=document.getElementById('fbStatusLbl');
-  if(dot)dot.style.background=online?'#00e676':'#ff1744';
-  if(lbl)lbl.textContent=online?'LIVE':'OFFLINE';
+  var dot=document.getElementById('fbStatusDot');
+  var lbl=document.getElementById('fbStatusLbl');
+  if(dot){
+    if(online===true) dot.style.background='#00e676';
+    else if(online===false) dot.style.background='#ff1744';
+    else dot.style.background='#ffa726'; // null = in-progress
+  }
+  if(lbl) lbl.textContent=online===true?'LIVE':online===false?'OFFLINE':'SAVING';
 }
 S=loadS()||defaultState();
 
@@ -2666,8 +2682,7 @@ function processBOQ(){
     }));
   }
 
-  window._uploading=false; // release upload guard
-  saveS(); // ONE save at end — pushes everything to Firebase at once
+  _finishUpload('boqStatus'); // push everything to Firebase in one shot
   const dwgCount=Object.keys(S.drawings).length;
   const sectionCount=Object.keys(S.steelReqs).length;
   showStatus('boqStatus',
@@ -3199,7 +3214,8 @@ function processFabUpload(){
   toast('✅ Fabrication updated: '+count+' records.');
   // Hide process buttons
   ['fabUploadBtn','fabUpdProcessBtn'].forEach(id=>{const b=document.getElementById(id);if(b)b.style.display='none';});
-  window._uploading=false;renderAll();fabFileRaw=null;
+  renderAll();fabFileRaw=null;
+  _finishUpload('fabUploadStatus');
 }
 function populateFabDescFilter(){
   const cats=[...new Set(Object.keys(S.drawings).map(k=>S.drawings[k].desc).filter(Boolean))].sort();
@@ -3417,8 +3433,8 @@ function processErecUpload(){
       +'</div>';
   }
   document.getElementById('erecUpdFile').value='';
-  window._uploading=false;
   erecFileRaw=null;
+  _finishUpload('erecUpdStatus');
 }
 function setErecFilter(m,btn){erecFilterMode=m;document.querySelectorAll('#page-erecstatus .frow .fbtn').forEach(b=>b.classList.remove('active'));btn?.classList.add('active');renderErecTable();}
 function renderErecTable(){
@@ -3604,6 +3620,8 @@ function submitSteelReceipt(){
   if(!S.steelRecv[sec])S.steelRecv[sec]=0;
   S.steelRecv[sec]=+(S.steelRecv[sec]+qty).toFixed(3);
   saveS();addLog('STEEL RECEIPT',CU?.name+' logged '+qty+' MT of '+sec);
+  showStatus('steelRcptStatus','✅ '+qty+' MT of '+sec+' saved — syncing to Firebase...','ok');
+  setTimeout(function(){_pushToFirebase('steelRcptStatus');},450);
   toast('✅ Receipt saved: '+qty+' MT of '+sec);
   renderSteelPage();renderReceiptLog();renderDash();
   ['r-sec','r-qty','r-challan','r-supplier','r-remarks'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
@@ -3628,6 +3646,8 @@ function submitFabUpdate(){
   if(boqQty&&document.getElementById('f-boqq'))document.getElementById('f-boqq').value=boqQty;
   computeSteelConsumption();saveS();
   addLog('FAB UPDATE',CU?.name+' → '+dwgNo+' '+status.toUpperCase()+' qty:'+qty+(boqDesc?' ['+boqDesc+']':''));
+  showStatus('fabRcptStatus','✅ '+dwgRaw+' updated — syncing to Firebase...','ok');
+  setTimeout(function(){_pushToFirebase('fabRcptStatus');},450);
   toast('✅ Fabrication updated: '+dwgRaw+(boqDesc?' ('+boqDesc+')':''));
   renderFabTable();renderDash();renderSteelPage();
 }
@@ -3668,6 +3688,8 @@ function submitErecUpdate(){
   saveS();
   const descInfo=boqD.desc?' ('+boqD.desc+', BOQ qty:'+boqD.reqQty+')':'';
   addLog('EREC UPDATE',CU?.name+' → '+dwgRaw+' '+status.toUpperCase()+descInfo);
+  showStatus('erecRcptStatus','✅ '+dwgRaw+' updated — syncing to Firebase...','ok');
+  setTimeout(function(){_pushToFirebase('erecRcptStatus');},450);
   toast('✅ Erection updated: '+dwgRaw+' → '+status);
   renderErecTable();renderDash();
 }
@@ -3785,8 +3807,8 @@ function processSteelUpload(){
   const prev=document.getElementById('steelUploadPreview');if(prev)prev.style.display='none';
   document.getElementById('steelImpFile').value='';
   steelFileRaw=null;
-  window._uploading=false;
   renderSteelPage();renderReceiptLog();renderDash();
+  _finishUpload('steelUploadStatus');
 }
 
 // Legacy alias kept for compatibility
@@ -4506,31 +4528,28 @@ function attachFbListener(key){
       const rt=rd._savedAt||0;
       const now=Date.now();
 
-      // Skip if WE saved within the last 6 seconds — prevents our own echo
-      // from overwriting in-progress operations (uploads, manual entries)
-      if((now - _lastSelfSave) < 6000){
-        console.log('FB: skipping echo — own save was '+(now-_lastSelfSave)+'ms ago');
+      // Skip our own echo: exact timestamp match within 3 seconds
+      if(rt>0 && rt===_lastSelfSave && (now-_lastSelfSave)<3000){
         _setFbDot(true);
         return;
       }
-
-      // Skip if an upload/batch operation is in progress
-      if(window._uploading){
-        console.log('FB: skipping — upload in progress');
+      // Skip if upload is in progress (will sync when _finishUpload runs)
+      if(window._uploading) return;
+      // Skip if this data is not newer than what we already have
+      if(rt>0 && rt<=(S._savedAt||0)){
+        _setFbDot(true);
         return;
       }
-
-      // Data is from another device/user — apply it
-      console.log('FB: applying remote update from '+new Date(rt).toLocaleTimeString());
+      // Remote update from another device — apply it
+      console.log('FB remote update ts='+new Date(rt).toLocaleTimeString());
       if(typeof fixCredsPublic==='function') S=fixCredsPublic(rd);
       else S=rd;
       localStorage.setItem(key,JSON.stringify(S));
       _setFbDot(true);
-
       if(CU){
         renderAll();
-        const who=rd.logs&&rd.logs.length?rd.logs[0].user:'another user';
-        if(who!==CU.id)toast('🔄 Live update from '+who);
+        var who=(rd.logs&&rd.logs.length)?rd.logs[0].user:'';
+        if(who&&who!==CU.id) toast('[sync] Live update from '+who);
       }
     }catch(e){console.warn('FB onValue error:',e);}
   },function(err){
