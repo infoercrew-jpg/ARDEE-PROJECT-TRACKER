@@ -4,6 +4,36 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Ardee Engineering – Project Tracker Pro v3</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Exo+2:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<script type="module">
+import{initializeApp}from"https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+import{getDatabase,ref,set,get,onValue}from"https://www.gstatic.com/firebasejs/11.0.0/firebase-database.js";
+const _cfg={
+  apiKey:"AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
+  authDomain:"work-progress-app-b1939.firebaseapp.com",
+  databaseURL:"https://work-progress-app-b1939-default-rtdb.firebaseio.com",
+  projectId:"work-progress-app-b1939",
+  storageBucket:"work-progress-app-b1939.firebasestorage.app",
+  messagingSenderId:"1035302891236",
+  appId:"1:1035302891236:web:8e4c6e5f0462a037a9c6f1"
+};
+try{
+  const app=initializeApp(_cfg);
+  const db=getDatabase(app);
+  // Expose to global scope for use by main script
+  window._db=db;
+  window._fbRef=ref;
+  window._fbSet=set;
+  window._fbGet=get;
+  window._fbOnValue=onValue;
+  window._fbReady=true;
+  console.log("Firebase module loaded OK");
+  // Notify main script Firebase is ready
+  window.dispatchEvent(new Event('firebaseReady'));
+}catch(e){
+  console.error("Firebase init error:",e.message);
+  window._fbReady=false;
+}
+</script>
 <script id="__EMBEDDED_STATE__" type="application/json">null</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -1153,27 +1183,36 @@ const PHOTO='/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwY
 // ════════════════════════════════════════════════════════════
 // FIREBASE REAL-TIME SYNC (compat SDK — works without type="module")
 // ════════════════════════════════════════════════════════════
-const _fbConfig={
-  apiKey:"AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
-  authDomain:"work-progress-app-b1939.firebaseapp.com",
-  projectId:"work-progress-app-b1939",
-  storageBucket:"work-progress-app-b1939.firebasestorage.app",
-  messagingSenderId:"1035302891236",
-  appId:"1:1035302891236:web:8e4c6e5f0462a037a9c6f1",
-  databaseURL:"https://work-progress-app-b1939-default-rtdb.firebaseio.com"
-};
-let _fbApp,_db,_fbReady=false,_fbListener=null;
-// Firebase is initialised in window.onload after CDN scripts are loaded
+// Firebase is loaded as ES module in <head> and exposed on window
+// _db, _fbRef, _fbSet, _fbGet, _fbOnValue are set by the module script
+let _db=null,_fbReady=false,_fbListener=null;
+
 function _initFirebase(){
-  try{
-    if(typeof firebase==='undefined'){console.warn('Firebase SDK not loaded — check internet connection.');return false;}
-    if(!_fbApp){
-      _fbApp=firebase.initializeApp(_fbConfig);
-      _db=firebase.database();
-      console.log('Firebase initialised ✅');
-    }
-    return true;
-  }catch(e){console.warn('Firebase init failed:',e.message);return false;}
+  // Pick up references set by the module script
+  if(window._db&&!_db){
+    _db=window._db;
+    _fbReady=true;
+    console.log('Firebase ready from module ✅');
+  }
+  return !!_db;
+}
+
+// Helper wrappers using module SDK functions exposed on window
+function _fbRefFn(path){ return window._fbRef&&_db ? window._fbRef(_db,path) : null; }
+function _fbSetFn(path,data){
+  var r=_fbRefFn(path);
+  if(!r) return Promise.reject(new Error('Firebase not ready'));
+  return window._fbSet(r,data);
+}
+function _fbGetFn(path){
+  var r=_fbRefFn(path);
+  if(!r) return Promise.reject(new Error('Firebase not ready'));
+  return window._fbGet(r);
+}
+function _fbOnValueFn(path,cb,errCb){
+  var r=_fbRefFn(path);
+  if(!r){console.warn('Firebase not ready for listener');return;}
+  window._fbOnValue(r,cb,errCb);
 }
 
 const PROJECTS_KEY='ardee_projects_v1'; // master project list
@@ -1346,7 +1385,7 @@ function _finishUpload(statusElId){
 }
 
 function _pushToFirebase(statusElId){
-  if(!_db){ _initFirebase(); }
+  _initFirebase();
   if(!_db){ _setFbDot(false); return; }
   try{
     const ts=S._savedAt;
@@ -1359,11 +1398,11 @@ function _pushToFirebase(statusElId){
       sd.dwgFiles[k]={fileName:(sd.dwgFiles[k]&&sd.dwgFiles[k].fileName)||''};
     });}
     _setFbDot(null); // orange = saving
-    _db.ref('projects/'+STATE_KEY).set(sd)
+    _fbSetFn('projects/'+STATE_KEY, sd)
       .then(function(){
         console.log('FB saved OK at '+new Date(ts).toLocaleTimeString());
         _setFbDot(true);
-        if(statusElId) showStatus(statusElId,'Saved to cloud at '+new Date(ts).toLocaleTimeString(),'ok');
+        if(statusElId) showStatus(statusElId,'Saved to cloud ✔ '+new Date(ts).toLocaleTimeString(),'ok');
       })
       .catch(function(e){
         console.warn('FB save failed:',e.message);
@@ -1501,7 +1540,7 @@ function doLogin(){
     if(S.logs.length>500)S.logs=S.logs.slice(0,500);
     localStorage.setItem(STATE_KEY,JSON.stringify(S));
     // Silently push to Firebase without calling saveS (avoids echo)
-    if(_db)_db.ref('projects/'+STATE_KEY).set(
+    if(_db)_fbSetFn('projects/'+STATE_KEY,
       JSON.parse(JSON.stringify(S))
     ).catch(function(e){console.warn('Login log push failed:',e);});
     if(typeof renderLog==='function')renderLog();
@@ -1509,7 +1548,7 @@ function doLogin(){
 
   // ALWAYS fetch fresh data from Firebase first, then authenticate
   if(_db&&STATE_KEY){
-    _db.ref('projects/'+STATE_KEY).once('value')
+    _fbGetFn('projects/'+STATE_KEY)
       .then(function(snap){
         console.log('Login: Firebase data fetched ✅');
         _tryLogin(snap.val());
@@ -2219,7 +2258,7 @@ function loadProjects(){
 // Sync project list from Firebase — ensures all devices see same projects
 function syncProjectsFromFirebase(callback){
   if(!_db){if(callback)callback();return;}
-  _db.ref('projectList').once('value').then(function(snap){
+  _fbGetFn('projectList').then(function(snap){
     const fbProjects=snap.val();
     if(fbProjects&&Array.isArray(fbProjects)&&fbProjects.length){
       localStorage.setItem(PROJECTS_KEY,JSON.stringify(fbProjects));
@@ -2237,7 +2276,7 @@ function saveProjects(projects){
   localStorage.setItem(PROJECTS_KEY,JSON.stringify(projects));
   // Also push project list to Firebase so other devices can discover projects
   if(_db){
-    _db.ref('projectList').set(projects).catch(function(e){
+    _fbSetFn('projectList',projects).catch(function(e){
       console.warn('FB projectList save failed:',e.message);
     });
   }
@@ -2392,7 +2431,7 @@ function deleteProject(projId){
     if(!confirm('Permanently delete project "'+proj.name+'"?\n\nAll BOQ, fabrication, erection and steel data will be lost.'))return;
     try{localStorage.removeItem(proj.stateKey||projId);}catch(e){}
     // Also remove from Firebase
-    if(_db){_db.ref('projects/'+(proj.stateKey||projId)).remove().catch(function(e){console.warn('FB delete failed:',e);});}
+    if(_db){var _delRef=_fbRefFn('projects/'+(proj.stateKey||projId));if(_delRef)window._fbSet(_delRef,null).catch(function(e){console.warn('FB delete failed:',e);});}
     const updated=projects.filter(function(p){return p.id!==projId;});
     if(updated.length===0){
       const defState=defaultState();const defKey='ardee_v3_default';
@@ -4491,37 +4530,32 @@ let _lastSelfSave=0;
 
 function startFbListener(attempt){
   attempt=attempt||1;
-  if(!_initFirebase()){
-    if(attempt<=5){
-      // Firebase CDN may still be loading — retry up to 5 times, 500ms apart
-      console.log('Firebase not ready, retry '+attempt+'/5...');
-      setTimeout(function(){startFbListener(attempt+1);},500);
+  _initFirebase();
+  if(!_db){
+    if(attempt<=10){
+      setTimeout(function(){startFbListener(attempt+1);},400);
       return;
     }
-    console.warn('Firebase failed after 5 retries — running offline only.');
-    const ind=document.getElementById('fbStatusDot');
-    const lbl=document.getElementById('fbStatusLbl');
-    if(ind)ind.style.background='#ff1744';
-    if(lbl)lbl.textContent='OFFLINE';
-    return;
+    console.warn('Firebase not available after retries — offline mode.');
+    _setFbDot(false); return;
   }
   _fbReady=true;
   _setFbDot(true);
-  console.log('Firebase ready ✅ (attempt '+attempt+') — attaching listener to: projects/'+STATE_KEY);
+  console.log('Firebase ready (attempt '+attempt+') — listening on projects/'+STATE_KEY);
   attachFbListener(STATE_KEY);
-  // Push any unsaved local changes to Firebase now that it's connected
-  if(S&&S._savedAt)_pushToFirebase();
+  // Push any pending local data to Firebase
+  if(S&&S._savedAt) _pushToFirebase();
 }
 
 function attachFbListener(key){
+  _initFirebase();
   if(!_db||!key)return;
-  // Detach previous listener cleanly
-  if(_fbListener){
-    try{_db.ref('projects/'+_fbListener).off('value');}catch(e){}
-  }
+  // Detach previous listener (module SDK uses returned unsubscribe fn)
+  if(typeof _fbUnsubscribe==='function'){try{_fbUnsubscribe();}catch(e){}}
   _fbListener=key;
+  var _fbUnsubscribeFn=null;
 
-  _db.ref('projects/'+key).on('value',function(snapshot){
+  _fbOnValueFn('projects/'+key, function(snapshot){
     try{
       const rd=snapshot.val();
       if(!rd||typeof rd!=='object')return;
@@ -4558,7 +4592,7 @@ function attachFbListener(key){
   });
 
   // Show online indicator
-  _db.ref('.info/connected').on('value',function(snap){
+  _fbOnValueFn('.info/connected',function(snap){
     const ind=document.getElementById('fbStatusDot');
     const lbl=document.getElementById('fbStatusLbl');
     const connected=snap.val()===true;
@@ -4573,14 +4607,21 @@ window.onload=function(){
   document.getElementById('ownerPhoto').src='data:image/jpeg;base64,'+PHOTO;
   const lLogo2=document.getElementById('lLogo2');
   if(lLogo2)lLogo2.src='data:image/jpeg;base64,'+LOGO;
-  // Start Firebase FIRST so _db is ready before initProjectScreen uses it
-  startFbListener();
-  // Then init project screen (syncProjectsFromFirebase is called inside)
+  // Firebase module loads asynchronously — listen for it then start
+  if(window._fbReady){
+    // Already loaded (fast connection)
+    startFbListener();
+  } else {
+    // Wait for module to fire firebaseReady event
+    window.addEventListener('firebaseReady',function(){
+      startFbListener();
+    },{once:true});
+    // Fallback: also try after 2 seconds in case event already fired
+    setTimeout(function(){if(!_fbReady) startFbListener();},2000);
+  }
   initProjectScreen();
 };
 </script>
 <!-- Firebase loaded at end of body to guarantee DOM + other scripts are ready -->
-<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 </body>
 </html>
