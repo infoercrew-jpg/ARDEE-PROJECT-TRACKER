@@ -305,6 +305,32 @@ hr.div{border:none;border-top:1px solid var(--border);margin:14px 0}
     </div>
   </div>
 
+  <!-- ADMIN AUTH MODAL — required for Add/Delete project -->
+  <div id="adminAuthModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:none;align-items:center;justify-content:center">
+    <div style="background:var(--s2);border:1px solid var(--accent);border-radius:14px;padding:28px;width:320px;box-shadow:0 0 40px rgba(0,200,255,.2)">
+      <div style="font-family:Orbitron,sans-serif;font-size:13px;font-weight:700;color:var(--accent);letter-spacing:2px;text-align:center;margin-bottom:6px">🔐 ADMIN REQUIRED</div>
+      <div id="adminAuthAction" style="font-size:10px;color:var(--muted);text-align:center;margin-bottom:16px;letter-spacing:1px"></div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="fg">
+          <label style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase">Administrator ID</label>
+          <input class="inp" id="adminAuthId" placeholder="Enter admin user ID" style="font-size:11px" onkeydown="if(event.key==='Enter')document.getElementById('adminAuthPwd').focus()">
+        </div>
+        <div class="fg">
+          <label style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase">Password</label>
+          <div style="position:relative">
+            <input class="inp" id="adminAuthPwd" type="password" placeholder="Enter password" style="font-size:11px;padding-right:36px" onkeydown="if(event.key==='Enter')verifyAdminAuth()">
+            <span onclick="const i=document.getElementById('adminAuthPwd');i.type=i.type==='password'?'text':'password'" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--muted);font-size:13px">👁</span>
+          </div>
+        </div>
+        <div id="adminAuthErr" style="display:none;color:var(--danger);font-size:10px;text-align:center">⚠ Invalid administrator credentials.</div>
+        <div style="display:flex;gap:8px;margin-top:4px">
+          <button class="btn btn-p" style="flex:1;justify-content:center;font-size:11px;padding:9px" onclick="verifyAdminAuth()">✔ VERIFY &amp; PROCEED</button>
+          <button class="btn btn-d" style="padding:9px 14px;font-size:11px" onclick="closeAdminAuth()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- LOGIN SCREEN (shown after project selected) -->
   <div class="login-card" id="loginScreen" style="display:none">
     <img id="lLogo2" src="" alt="Ardee" style="height:48px;margin-bottom:12px;border-radius:8px;border:1px solid rgba(0,200,255,.3);box-shadow:0 0 20px rgba(0,200,255,.2)">
@@ -1200,7 +1226,7 @@ function getScopeTotals(){
 function getFabTotals(){
   // qty counts
   let wip=0,offered=0,final=0,paint=0,disp=0,scopeQty=0,scopeWt=0;
-  // weight totals: unit_wt = drawing.totalWt / drawing.reqQty  → status_wt = status_qty × unit_wt
+  // weight totals: unit_wt = drawing.totalWt / drawing.reqQty -> status_wt = status_qty * unit_wt
   let wipWt=0,offeredWt=0,finalWt=0,paintWt=0,dispWt=0,fabWt=0;
   Object.keys(S.drawings).forEach(k=>{
     const d=S.drawings[k];const fs=S.fabStatus[k]||{};
@@ -1225,7 +1251,7 @@ function getFabTotals(){
          wipWt,offeredWt,finalWt,paintWt,dispWt,fabWt};
 }
 
-// Compute erection weight totals from erecItems × BOQ unit weight
+// Compute erection weight totals from erecItems * BOQ unit weight
 function getErecTotals(){
   let recvQty=0,assembledQty=0,erectedQty=0,alignedQty=0,inspectedQty=0,billedQty=0;
   let recvWt=0,assembledWt=0,erectedWt=0,alignedWt=0,inspectedWt=0,billedWt=0;
@@ -1297,10 +1323,11 @@ function loadS(){
 function saveS(){
   try{
     S._savedAt=Date.now();
+    _lastSelfSave=S._savedAt; // set IMMEDIATELY so listener echo window starts now
     // 1. Always save locally first (instant, works offline)
     localStorage.setItem(STATE_KEY,JSON.stringify(S));
-    // 2. Push to Firebase — try even if _fbReady not set yet
-    _pushToFirebase();
+    // 2. Push to Firebase (skipped during batch uploads — single push at end)
+    if(!window._uploading) _pushToFirebase();
   }catch(e){toast('⚠️ Storage full. Consider clearing old data.',1);}
 }
 
@@ -1313,7 +1340,7 @@ function _pushToFirebase(){
     return;
   }
   try{
-    _lastSelfSave=S._savedAt;
+    // _lastSelfSave already set in saveS() — don't overwrite here
     const sd=JSON.parse(JSON.stringify(S));
     // Strip base64 photos/PDFs — too large for Firebase free tier
     if(sd.photos){Object.keys(sd.photos).forEach(function(f){
@@ -2264,10 +2291,57 @@ function backToProjects(){
   const rb=document.getElementById('resetBtn');if(rb)rb.style.display='none';
 }
 
-function showAddProject(){
-  document.getElementById('addProjectForm').style.display='block';
-  document.getElementById('np-name').focus();
+// ── Admin Auth Modal ──────────────────────────────────────────
+let _adminAuthCallback=null; // function to run after successful auth
+
+function requireAdminAuth(actionLabel, callback){
+  _adminAuthCallback=callback;
+  const modal=document.getElementById('adminAuthModal');
+  const lbl=document.getElementById('adminAuthAction');
+  const err=document.getElementById('adminAuthErr');
+  if(lbl)lbl.textContent=actionLabel;
+  if(err)err.style.display='none';
+  document.getElementById('adminAuthId').value='';
+  document.getElementById('adminAuthPwd').value='';
+  modal.style.display='flex';
+  setTimeout(function(){document.getElementById('adminAuthId').focus();},80);
 }
+
+function closeAdminAuth(){
+  document.getElementById('adminAuthModal').style.display='none';
+  _adminAuthCallback=null;
+}
+
+function verifyAdminAuth(){
+  const uid=document.getElementById('adminAuthId').value.trim();
+  const pwd=document.getElementById('adminAuthPwd').value;
+  const err=document.getElementById('adminAuthErr');
+  // Check against hardcoded admin credentials (always valid)
+  const isAdmin=(uid==='sachin2026'&&pwd==='sks@989806');
+  // Also check against any admin user in current project S.users
+  const inProject=S&&S.users&&S.users.find(function(u){
+    return u.id===uid&&u.pass===pwd&&u.perms&&u.perms.admin&&u.active!==0;
+  });
+  if(!isAdmin&&!inProject){
+    if(err)err.style.display='block';
+    document.getElementById('adminAuthPwd').value='';
+    document.getElementById('adminAuthPwd').focus();
+    return;
+  }
+  // Auth passed — close modal and run callback
+  document.getElementById('adminAuthModal').style.display='none';
+  if(typeof _adminAuthCallback==='function') _adminAuthCallback();
+  _adminAuthCallback=null;
+}
+
+// ── Project Add / Delete (admin-gated) ─────────────────────
+function showAddProject(){
+  requireAdminAuth('ADD NEW PROJECT — Administrator verification required',function(){
+    document.getElementById('addProjectForm').style.display='block';
+    document.getElementById('np-name').focus();
+  });
+}
+
 function hideAddProject(){
   document.getElementById('addProjectForm').style.display='none';
   ['np-name','np-client','np-loc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
@@ -2280,43 +2354,39 @@ function addNewProject(){
   const loc=document.getElementById('np-loc')?.value.trim()||'';
   const id='ardee_proj_'+Date.now();
   const stateKey=id;
-  // Create fresh state for this project
   const freshState=defaultState();
   freshState.project.name=name;
   freshState.project.client=client;
   freshState.project.location=loc;
   localStorage.setItem(stateKey,JSON.stringify(freshState));
-  // Add to project list
   const projects=loadProjects();
   projects.push({id,name,client,location:loc,created:Date.now(),stateKey});
   saveProjects(projects);
   hideAddProject();
   renderProjectList();
   toast('✅ Project created: '+name);
-  // Auto-select the new project
-  setTimeout(()=>selectProject(id),300);
+  setTimeout(function(){selectProject(id);},300);
 }
 
 function deleteProject(projId){
   const projects=loadProjects();
-  const proj=projects.find(p=>p.id===projId);
+  const proj=projects.find(function(p){return p.id===projId;});
   if(!proj)return;
-  if(!confirm('Delete project "'+proj.name+'"? All data for this project will be permanently lost.'))return;
-  // Remove project state
-  try{localStorage.removeItem(proj.stateKey||projId);}catch(e){}
-  // Remove from list
-  const updated=projects.filter(p=>p.id!==projId);
-  // Always keep at least one project
-  if(updated.length===0){
-    const defState=defaultState();
-    const defKey='ardee_v3_default';
-    localStorage.setItem(defKey,JSON.stringify(defState));
-    updated.push({id:defKey,name:'Default Project',client:'',location:'',created:Date.now(),stateKey:defKey});
-  }
-  saveProjects(updated);
-  renderProjectList();
-  addLog('DELETE','Project deleted: '+proj.name);
-  toast('✅ Project deleted.');
+  requireAdminAuth('DELETE PROJECT: "'+proj.name+'" — This cannot be undone',function(){
+    if(!confirm('Permanently delete project "'+proj.name+'"?\n\nAll BOQ, fabrication, erection and steel data will be lost.'))return;
+    try{localStorage.removeItem(proj.stateKey||projId);}catch(e){}
+    // Also remove from Firebase
+    if(_db){_db.ref('projects/'+(proj.stateKey||projId)).remove().catch(function(e){console.warn('FB delete failed:',e);});}
+    const updated=projects.filter(function(p){return p.id!==projId;});
+    if(updated.length===0){
+      const defState=defaultState();const defKey='ardee_v3_default';
+      localStorage.setItem(defKey,JSON.stringify(defState));
+      updated.push({id:defKey,name:'Default Project',client:'',location:'',created:Date.now(),stateKey:defKey});
+    }
+    saveProjects(updated);
+    renderProjectList();
+    toast('✅ Project "'+proj.name+'" deleted.');
+  });
 }
 
 // Auto-select project if only one exists
@@ -2397,6 +2467,7 @@ function handleBOQUpload(input){
   const reader=new FileReader();
   reader.onload=e=>{
     try{
+      window._uploading=true; // block Firebase listener during BOQ processing
       boqRawWb=XLSX.read(e.target.result,{type:'binary',cellDates:true});
       // ── find the best sheet ──────────────────────────────
       // Priority: sheet whose name contains "BOQ" or "PART LIST", else first sheet
@@ -2595,7 +2666,8 @@ function processBOQ(){
     }));
   }
 
-  saveS();
+  window._uploading=false; // release upload guard
+  saveS(); // ONE save at end — pushes everything to Firebase at once
   const dwgCount=Object.keys(S.drawings).length;
   const sectionCount=Object.keys(S.steelReqs).length;
   showStatus('boqStatus',
@@ -2938,7 +3010,7 @@ function renderDashSummary(){
   Object.keys(cats).forEach(desc=>{
     cats[desc].dwgs.forEach(dwgNo=>{cats[desc].qty+=(S.drawings[dwgNo]?.reqQty||0);});
   });
-  // Fab status weights: qty × unit_wt per drawing
+  // Fab status weights: qty * unit_wt per drawing
   Object.keys(S.fabStatus).forEach(k=>{
     const d=S.drawings[k];if(!d)return;
     const cat=cats[d.desc];if(!cat)return;
@@ -3079,6 +3151,7 @@ function handleFabUpload(input){
 }
 function processFabUpload(){
   if(!fabFileRaw){toast('⚠️ No file loaded. Please upload an Excel file first.',1);return;}
+  window._uploading=true;
   let count=0, noMatch=0;
   fabFileRaw.forEach(row=>{
     // Try every possible column name for the drawing number
@@ -3090,7 +3163,7 @@ function processFabUpload(){
     const dl=dwgRaw.toLowerCase();
     if(dl==='assembly dwg no.'||dl==='assembly dwg. no.'||dl==='dwg no'||dl==='drawing no.'||dl.startsWith('project')||dl.startsWith('client'))return;
 
-    // Smart match: exact → suffix → contains → store as-is
+    // Smart match: exact -> suffix -> contains -> store as-is
     let dwgNo = dwgRaw;
     const dwgKeys = Object.keys(S.drawings);
     if(dwgKeys.length>0){
@@ -3126,7 +3199,7 @@ function processFabUpload(){
   toast('✅ Fabrication updated: '+count+' records.');
   // Hide process buttons
   ['fabUploadBtn','fabUpdProcessBtn'].forEach(id=>{const b=document.getElementById(id);if(b)b.style.display='none';});
-  renderAll();fabFileRaw=null;
+  window._uploading=false;renderAll();fabFileRaw=null;
 }
 function populateFabDescFilter(){
   const cats=[...new Set(Object.keys(S.drawings).map(k=>S.drawings[k].desc).filter(Boolean))].sort();
@@ -3266,6 +3339,7 @@ function renderErecUploadPreview(){
 }
 function processErecUpload(){
   if(!erecFileRaw){toast('⚠️ No file loaded.',1);return;}
+  window._uploading=true;
   let count=0, noMatch=0;
   erecFileRaw.forEach(row=>{
     const dwgRaw=String(
@@ -3343,6 +3417,7 @@ function processErecUpload(){
       +'</div>';
   }
   document.getElementById('erecUpdFile').value='';
+  window._uploading=false;
   erecFileRaw=null;
 }
 function setErecFilter(m,btn){erecFilterMode=m;document.querySelectorAll('#page-erecstatus .frow .fbtn').forEach(b=>b.classList.remove('active'));btn?.classList.add('active');renderErecTable();}
@@ -3539,7 +3614,7 @@ function submitFabUpdate(){
   const status=document.getElementById('f-status').value;
   const qty=parseInt(document.getElementById('f-qty').value)||1;
   if(!dwgRaw){toast('⚠️ Enter drawing number.',1);return;}
-  // Smart match: suffix → exact → store raw
+  // Smart match: suffix -> exact -> store raw
   const dwgNo=Object.keys(S.drawings).find(k=>k===dwgRaw||k.endsWith('-'+dwgRaw)||k.endsWith('_'+dwgRaw))||dwgRaw;
   if(!S.fabStatus[dwgNo])S.fabStatus[dwgNo]={wip:0,offered:0,final:0,paint:0,disp:0,updBy:''};
   const keyMap={wip:'wip',offered:'offered',final:'final',paint:'paint',disp:'disp'};
@@ -3669,6 +3744,7 @@ function renderSteelUploadPreview(rows){
 
 function processSteelUpload(){
   if(!steelFileRaw){toast('⚠️ No file loaded.',1);return;}
+  window._uploading=true;
   let count=0,skipped=0;
   const summary={};
   steelFileRaw.forEach(row=>{
@@ -3709,6 +3785,7 @@ function processSteelUpload(){
   const prev=document.getElementById('steelUploadPreview');if(prev)prev.style.display='none';
   document.getElementById('steelImpFile').value='';
   steelFileRaw=null;
+  window._uploading=false;
   renderSteelPage();renderReceiptLog();renderDash();
 }
 
@@ -4172,7 +4249,7 @@ function hideAc(dropId){setTimeout(()=>{const el=document.getElementById(dropId)
 function autoFillFab(){
   const raw=document.getElementById('f-dwg').value.trim();
   if(!raw)return;
-  // Smart match: exact → suffix → short key
+  // Smart match: exact -> suffix -> short key
   const dwgNo=Object.keys(S.drawings).find(k=>k===raw||k.endsWith('-'+raw)||k.endsWith('_'+raw))||raw;
   const d=S.drawings[dwgNo];
   if(d){
@@ -4429,28 +4506,32 @@ function attachFbListener(key){
       const rt=rd._savedAt||0;
       const now=Date.now();
 
-      // Skip only our OWN echo (exact timestamp match within 3 seconds)
-      if(rt>0 && rt===_lastSelfSave && (now-_lastSelfSave)<3000){
-        console.log('FB: skipping own echo ('+rt+')');
+      // Skip if WE saved within the last 6 seconds — prevents our own echo
+      // from overwriting in-progress operations (uploads, manual entries)
+      if((now - _lastSelfSave) < 6000){
+        console.log('FB: skipping echo — own save was '+(now-_lastSelfSave)+'ms ago');
+        _setFbDot(true);
         return;
       }
 
-      // Always apply — Firebase is the single source of truth
-      console.log('FB: received update saved at '+new Date(rt).toLocaleTimeString());
+      // Skip if an upload/batch operation is in progress
+      if(window._uploading){
+        console.log('FB: skipping — upload in progress');
+        return;
+      }
+
+      // Data is from another device/user — apply it
+      console.log('FB: applying remote update from '+new Date(rt).toLocaleTimeString());
       if(typeof fixCredsPublic==='function') S=fixCredsPublic(rd);
       else S=rd;
       localStorage.setItem(key,JSON.stringify(S));
       _setFbDot(true);
 
       if(CU){
-        // Logged in — re-render everything with fresh data
         renderAll();
-        const lastUser=(rd.logs&&rd.logs.length&&rd.logs[0].user!==CU.id)
-          ? '🔄 Live update from '+rd.logs[0].user
-          : '🔄 Data refreshed';
-        toast(lastUser);
+        const who=rd.logs&&rd.logs.length?rd.logs[0].user:'another user';
+        if(who!==CU.id)toast('🔄 Live update from '+who);
       }
-      // Not logged in — data is in S ready for doLogin to use
     }catch(e){console.warn('FB onValue error:',e);}
   },function(err){
     console.warn('FB listener error:',err.message);
