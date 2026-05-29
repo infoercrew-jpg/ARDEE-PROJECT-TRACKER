@@ -4,36 +4,8 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Ardee Engineering – Project Tracker Pro v3</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Exo+2:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<script type="module">
-import{initializeApp}from"https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
-import{getDatabase,ref,set,get,onValue}from"https://www.gstatic.com/firebasejs/11.0.0/firebase-database.js";
-const _cfg={
-  apiKey:"AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
-  authDomain:"work-progress-app-b1939.firebaseapp.com",
-  databaseURL:"https://work-progress-app-b1939-default-rtdb.firebaseio.com",
-  projectId:"work-progress-app-b1939",
-  storageBucket:"work-progress-app-b1939.firebasestorage.app",
-  messagingSenderId:"1035302891236",
-  appId:"1:1035302891236:web:8e4c6e5f0462a037a9c6f1"
-};
-try{
-  const app=initializeApp(_cfg);
-  const db=getDatabase(app);
-  // Expose to global scope for use by main script
-  window._db=db;
-  window._fbRef=ref;
-  window._fbSet=set;
-  window._fbGet=get;
-  window._fbOnValue=onValue;
-  window._fbReady=true;
-  console.log("Firebase module loaded OK");
-  // Notify main script Firebase is ready
-  window.dispatchEvent(new Event('firebaseReady'));
-}catch(e){
-  console.error("Firebase init error:",e.message);
-  window._fbReady=false;
-}
-</script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 <script id="__EMBEDDED_STATE__" type="application/json">null</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -1188,31 +1160,45 @@ const PHOTO='/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwY
 let _db=null,_fbReady=false,_fbListener=null;
 
 function _initFirebase(){
-  // Pick up references set by the module script
-  if(window._db&&!_db){
-    _db=window._db;
+  if(_db) return true; // already initialised
+  try{
+    if(typeof firebase==='undefined'){
+      console.warn('Firebase SDK not loaded yet');
+      return false;
+    }
+    if(!firebase.apps||!firebase.apps.length){
+      firebase.initializeApp({
+        apiKey:"AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
+        authDomain:"work-progress-app-b1939.firebaseapp.com",
+        databaseURL:"https://work-progress-app-b1939-default-rtdb.firebaseio.com",
+        projectId:"work-progress-app-b1939",
+        storageBucket:"work-progress-app-b1939.firebasestorage.app",
+        messagingSenderId:"1035302891236",
+        appId:"1:1035302891236:web:8e4c6e5f0462a037a9c6f1"
+      });
+    }
+    _db=firebase.database();
     _fbReady=true;
-    console.log('Firebase ready from module ✅');
+    console.log('Firebase compat ready ✅');
+    return true;
+  }catch(e){
+    console.warn('Firebase init failed:',e.message);
+    return false;
   }
-  return !!_db;
 }
 
-// Helper wrappers using module SDK functions exposed on window
-function _fbRefFn(path){ return window._fbRef&&_db ? window._fbRef(_db,path) : null; }
+// Compat-style helpers (same API as before)
 function _fbSetFn(path,data){
-  var r=_fbRefFn(path);
-  if(!r) return Promise.reject(new Error('Firebase not ready'));
-  return window._fbSet(r,data);
+  if(!_db) return Promise.reject(new Error('Firebase not ready'));
+  return _db.ref(path).set(data);
 }
 function _fbGetFn(path){
-  var r=_fbRefFn(path);
-  if(!r) return Promise.reject(new Error('Firebase not ready'));
-  return window._fbGet(r);
+  if(!_db) return Promise.reject(new Error('Firebase not ready'));
+  return _db.ref(path).once('value');
 }
 function _fbOnValueFn(path,cb,errCb){
-  var r=_fbRefFn(path);
-  if(!r){console.warn('Firebase not ready for listener');return;}
-  window._fbOnValue(r,cb,errCb);
+  if(!_db){console.warn('Firebase not ready for listener');return;}
+  _db.ref(path).on('value',cb,errCb);
 }
 
 const PROJECTS_KEY='ardee_projects_v1'; // master project list
@@ -4560,10 +4546,9 @@ function startFbListener(attempt){
 function attachFbListener(key){
   _initFirebase();
   if(!_db||!key)return;
-  // Detach previous listener (module SDK uses returned unsubscribe fn)
-  if(typeof _fbUnsubscribe==='function'){try{_fbUnsubscribe();}catch(e){}}
+  // Detach previous listener
+  if(_fbListener){try{_db.ref('projects/'+_fbListener).off('value');}catch(e){}}
   _fbListener=key;
-  var _fbUnsubscribeFn=null;
 
   _fbOnValueFn('projects/'+key, function(snapshot){
     try{
@@ -4602,7 +4587,7 @@ function attachFbListener(key){
   });
 
   // Show online indicator
-  _fbOnValueFn('.info/connected',function(snap){
+  if(_db)_db.ref('.info/connected').on('value',function(snap){
     const ind=document.getElementById('fbStatusDot');
     const lbl=document.getElementById('fbStatusLbl');
     const connected=snap.val()===true;
@@ -4617,18 +4602,8 @@ window.onload=function(){
   document.getElementById('ownerPhoto').src='data:image/jpeg;base64,'+PHOTO;
   const lLogo2=document.getElementById('lLogo2');
   if(lLogo2)lLogo2.src='data:image/jpeg;base64,'+LOGO;
-  // Firebase module loads asynchronously — listen for it then start
-  if(window._fbReady){
-    // Already loaded (fast connection)
-    startFbListener();
-  } else {
-    // Wait for module to fire firebaseReady event
-    window.addEventListener('firebaseReady',function(){
-      startFbListener();
-    },{once:true});
-    // Fallback: also try after 2 seconds in case event already fired
-    setTimeout(function(){if(!_fbReady) startFbListener();},2000);
-  }
+  // Start Firebase (compat SDK loads synchronously via CDN)
+  startFbListener();
   initProjectScreen();
 };
 </script>
