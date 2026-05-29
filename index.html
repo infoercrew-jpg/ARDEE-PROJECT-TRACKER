@@ -4,8 +4,36 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Ardee Engineering – Project Tracker Pro v3</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Exo+2:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script type="module">
+import{initializeApp}from"https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+import{getDatabase,ref,set,get,onValue}from"https://www.gstatic.com/firebasejs/11.0.0/firebase-database.js";
+const _cfg={
+  apiKey:"AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
+  authDomain:"work-progress-app-b1939.firebaseapp.com",
+  databaseURL:"https://work-progress-app-b1939-default-rtdb.firebaseio.com",
+  projectId:"work-progress-app-b1939",
+  storageBucket:"work-progress-app-b1939.firebasestorage.app",
+  messagingSenderId:"1035302891236",
+  appId:"1:1035302891236:web:8e4c6e5f0462a037a9c6f1"
+};
+try{
+  const app=initializeApp(_cfg);
+  const db=getDatabase(app);
+  // Expose to global scope for use by main script
+  window._db=db;
+  window._fbRef=ref;
+  window._fbSet=set;
+  window._fbGet=get;
+  window._fbOnValue=onValue;
+  window._fbReady=true;
+  console.log("Firebase module loaded OK");
+  // Notify main script Firebase is ready
+  window.dispatchEvent(new Event('firebaseReady'));
+}catch(e){
+  console.error("Firebase init error:",e.message);
+  window._fbReady=false;
+}
+</script>
 <script id="__EMBEDDED_STATE__" type="application/json">null</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -1160,45 +1188,31 @@ const PHOTO='/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwY
 let _db=null,_fbReady=false,_fbListener=null;
 
 function _initFirebase(){
-  if(_db) return true; // already initialised
-  try{
-    if(typeof firebase==='undefined'){
-      console.warn('Firebase SDK not loaded yet');
-      return false;
-    }
-    if(!firebase.apps||!firebase.apps.length){
-      firebase.initializeApp({
-        apiKey:"AIzaSyCU2C3UkwQtZJNn4WP6DCjic7Ul6gdSBdM",
-        authDomain:"work-progress-app-b1939.firebaseapp.com",
-        databaseURL:"https://work-progress-app-b1939-default-rtdb.firebaseio.com",
-        projectId:"work-progress-app-b1939",
-        storageBucket:"work-progress-app-b1939.firebasestorage.app",
-        messagingSenderId:"1035302891236",
-        appId:"1:1035302891236:web:8e4c6e5f0462a037a9c6f1"
-      });
-    }
-    _db=firebase.database();
+  // Pick up references set by the module script
+  if(window._db&&!_db){
+    _db=window._db;
     _fbReady=true;
-    console.log('Firebase compat ready ✅');
-    return true;
-  }catch(e){
-    console.warn('Firebase init failed:',e.message);
-    return false;
+    console.log('Firebase ready from module ✅');
   }
+  return !!_db;
 }
 
-// Compat-style helpers (same API as before)
+// Helper wrappers using module SDK functions exposed on window
+function _fbRefFn(path){ return window._fbRef&&_db ? window._fbRef(_db,path) : null; }
 function _fbSetFn(path,data){
-  if(!_db) return Promise.reject(new Error('Firebase not ready'));
-  return _db.ref(path).set(data);
+  var r=_fbRefFn(path);
+  if(!r) return Promise.reject(new Error('Firebase not ready'));
+  return window._fbSet(r,data);
 }
 function _fbGetFn(path){
-  if(!_db) return Promise.reject(new Error('Firebase not ready'));
-  return _db.ref(path).once('value');
+  var r=_fbRefFn(path);
+  if(!r) return Promise.reject(new Error('Firebase not ready'));
+  return window._fbGet(r);
 }
 function _fbOnValueFn(path,cb,errCb){
-  if(!_db){console.warn('Firebase not ready for listener');return;}
-  _db.ref(path).on('value',cb,errCb);
+  var r=_fbRefFn(path);
+  if(!r){console.warn('Firebase not ready for listener');return;}
+  window._fbOnValue(r,cb,errCb);
 }
 
 const PROJECTS_KEY='ardee_projects_v1'; // master project list
@@ -1346,68 +1360,58 @@ function loadS(){
 })();
 
 // ── SAVE & FIREBASE SYNC ─────────────────────────────────────
-// Simple, reliable: saveS saves locally always.
-// _syncToFirebase does the cloud push — called explicitly after each action.
+let _fbPushTimer=null; // debounce timer
 
 function saveS(){
   try{
     S._savedAt=Date.now();
     _lastSelfSave=S._savedAt;
+    // 1. Save to localStorage immediately (works offline too)
     localStorage.setItem(STATE_KEY,JSON.stringify(S));
-    // During bulk uploads saveS is called many times — skip cloud push.
-    // The upload function calls _syncToFirebase() once at the very end.
-    if(!window._uploading) _syncToFirebase();
+    // 2. During bulk uploads: skip — caller calls _finishUpload() at the end
+    if(window._uploading) return;
+    // 3. Debounce: wait 400ms after last save before pushing to Firebase
+    //    This batches rapid consecutive saves (e.g. multiple field updates)
+    if(_fbPushTimer) clearTimeout(_fbPushTimer);
+    _fbPushTimer=setTimeout(function(){ _fbPushTimer=null; _pushToFirebase(); }, 400);
   }catch(e){toast('Storage full — consider clearing old data.',1);}
 }
 
-// Called at end of every bulk upload — clears flag then pushes once
+// Call at end of every bulk upload to do ONE Firebase push
 function _finishUpload(statusElId){
   window._uploading=false;
-  _syncToFirebase(statusElId);
+  _fbPushTimer=null;
+  _pushToFirebase(statusElId);
 }
 
-// Push current S to Firebase. Shows status in element if statusElId given.
-function _syncToFirebase(statusElId){
+function _pushToFirebase(statusElId){
   _initFirebase();
-  if(!_db){
-    _setFbDot(false);
-    if(statusElId) showStatus(statusElId,'Saved locally (Firebase not connected)','info');
-    return;
-  }
+  if(!_db){ _setFbDot(false); return; }
   try{
-    var ts=S._savedAt;
-    var sd=JSON.parse(JSON.stringify(S));
-    // Strip large base64 data — keep within Firebase free tier (1GB)
+    const ts=S._savedAt;
+    const sd=JSON.parse(JSON.stringify(S));
+    // Strip base64 blobs — keep Firebase under free-tier limits
     if(sd.photos){Object.keys(sd.photos).forEach(function(f){
-      if(sd.photos[f])sd.photos[f]=sd.photos[f].map(function(p){
-        return{date:p.date,name:p.name,by:p.by,data:''};
-      });
+      if(sd.photos[f])sd.photos[f]=sd.photos[f].map(function(p){return Object.assign({},p,{data:''});});
     });}
     if(sd.dwgFiles){Object.keys(sd.dwgFiles).forEach(function(k){
       sd.dwgFiles[k]={fileName:(sd.dwgFiles[k]&&sd.dwgFiles[k].fileName)||''};
     });}
-    _setFbDot(null);
+    _setFbDot(null); // orange = saving
     _fbSetFn('projects/'+STATE_KEY, sd)
       .then(function(){
+        console.log('FB saved OK at '+new Date(ts).toLocaleTimeString());
         _setFbDot(true);
-        console.log('Firebase OK '+new Date(ts).toLocaleTimeString());
-        if(statusElId){
-          showStatus(statusElId,
-            '<span style="color:var(--ok)">&#10003; Saved to Firebase at '+
-            new Date(ts).toLocaleTimeString()+'</span>','ok');
-        }
+        if(statusElId) showStatus(statusElId,'Saved to cloud ✔ '+new Date(ts).toLocaleTimeString(),'ok');
       })
-      .catch(function(err){
+      .catch(function(e){
+        console.warn('FB save failed:',e.message);
         _setFbDot(false);
-        console.warn('Firebase save failed:',err.message);
-        var msg='&#9888; Firebase error: '+err.message;
+        var msg='Firebase sync failed: '+e.message;
         if(statusElId) showStatus(statusElId,msg,'err');
-        else toast('Firebase sync failed: '+err.message,1);
+        else toast(msg,1);
       });
-  }catch(e){
-    console.warn('_syncToFirebase error:',e);
-    _setFbDot(false);
-  }
+  }catch(fe){console.warn('_pushToFirebase error:',fe);}
 }
 
 function _setFbDot(online){
@@ -1436,9 +1440,7 @@ function addLog(type,text){
   S.logs=S.logs||[];
   S.logs.unshift({type,text,time:nowStr(),user:CU?.id||'—'});
   if(S.logs.length>500)S.logs=S.logs.slice(0,500);
-  // NOTE: Do NOT call saveS() here — the caller already calls saveS/syncToFirebase.
-  // Calling saveS inside addLog causes a double Firebase push on every action.
-  try{localStorage.setItem(STATE_KEY,JSON.stringify(S));}catch(e){}
+  saveS(); // saves locally + pushes to Firebase
   if(typeof renderLog==='function')renderLog();
 }
 function toast(msg,err){
@@ -1538,7 +1540,9 @@ function doLogin(){
     if(S.logs.length>500)S.logs=S.logs.slice(0,500);
     localStorage.setItem(STATE_KEY,JSON.stringify(S));
     // Silently push to Firebase without calling saveS (avoids echo)
-    if(_db)_syncToFirebase();
+    if(_db)_fbSetFn('projects/'+STATE_KEY,
+      JSON.parse(JSON.stringify(S))
+    ).catch(function(e){console.warn('Login log push failed:',e);});
     if(typeof renderLog==='function')renderLog();
   }
 
@@ -2574,7 +2578,7 @@ function handleBOQUpload(input){
       const sheetInfo=sheetNames.length>1?` (Sheet: "${bestSheet}" of ${sheetNames.length})`:` (Sheet: "${bestSheet}")`;
       showStatus('boqStatus','✅ '+file.name+sheetInfo+' — '+dataRows.length+' data rows found. Headers: '+headers.filter(Boolean).slice(0,6).join(', ')+'… Click PROCESS & UPLOAD to import.','ok');
       document.getElementById('boqUploadBtn').style.display='inline-flex';
-    }catch(err){window._uploading=false;showStatus('boqStatus','⚠️ Error: '+err.message,'err');}
+    }catch(err){showStatus('boqStatus','⚠️ Error: '+err.message,'err');}
   };
   reader.readAsBinaryString(file);
 }
@@ -3249,8 +3253,7 @@ function processFabUpload(){
   toast('✅ Fabrication updated: '+count+' records.');
   // Hide process buttons
   ['fabUploadBtn','fabUpdProcessBtn'].forEach(id=>{const b=document.getElementById(id);if(b)b.style.display='none';});
-  fabFileRaw=null;
-  renderAll();
+  renderAll();fabFileRaw=null;
   _finishUpload('fabUploadStatus');
 }
 function populateFabDescFilter(){
@@ -3655,9 +3658,9 @@ function submitSteelReceipt(){
   S.receipts.push(r);
   if(!S.steelRecv[sec])S.steelRecv[sec]=0;
   S.steelRecv[sec]=+(S.steelRecv[sec]+qty).toFixed(3);
-  addLog('STEEL RECEIPT',CU?.name+' logged '+qty+' MT of '+sec);
-  saveS();
-  _syncToFirebase('steelRcptStatus');
+  saveS();addLog('STEEL RECEIPT',CU?.name+' logged '+qty+' MT of '+sec);
+  showStatus('steelRcptStatus','✅ '+qty+' MT of '+sec+' saved — syncing to Firebase...','ok');
+  setTimeout(function(){_pushToFirebase('steelRcptStatus');},450);
   toast('✅ Receipt saved: '+qty+' MT of '+sec);
   renderSteelPage();renderReceiptLog();renderDash();
   ['r-sec','r-qty','r-challan','r-supplier','r-remarks'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
@@ -3680,10 +3683,10 @@ function submitFabUpdate(){
   const boqQty=S.drawings[dwgNo]?.reqQty||0;
   if(boqDesc&&document.getElementById('f-desc'))document.getElementById('f-desc').value=boqDesc;
   if(boqQty&&document.getElementById('f-boqq'))document.getElementById('f-boqq').value=boqQty;
-  computeSteelConsumption();
+  computeSteelConsumption();saveS();
   addLog('FAB UPDATE',CU?.name+' → '+dwgNo+' '+status.toUpperCase()+' qty:'+qty+(boqDesc?' ['+boqDesc+']':''));
-  saveS();
-  _syncToFirebase('fabRcptStatus');
+  showStatus('fabRcptStatus','✅ '+dwgRaw+' updated — syncing to Firebase...','ok');
+  setTimeout(function(){_pushToFirebase('fabRcptStatus');},450);
   toast('✅ Fabrication updated: '+dwgRaw+(boqDesc?' ('+boqDesc+')':''));
   renderFabTable();renderDash();renderSteelPage();
 }
@@ -3721,10 +3724,11 @@ function submitErecUpdate(){
   if(document.getElementById('e-gridx')?.value)ei.locX=document.getElementById('e-gridx').value;
   if(document.getElementById('e-gridy')?.value)ei.locY=document.getElementById('e-gridy').value;
   if(document.getElementById('e-gang')?.value)ei.gang=document.getElementById('e-gang').value;
+  saveS();
   const descInfo=boqD.desc?' ('+boqD.desc+', BOQ qty:'+boqD.reqQty+')':'';
   addLog('EREC UPDATE',CU?.name+' → '+dwgRaw+' '+status.toUpperCase()+descInfo);
-  saveS();
-  _syncToFirebase('erecRcptStatus');
+  showStatus('erecRcptStatus','✅ '+dwgRaw+' updated — syncing to Firebase...','ok');
+  setTimeout(function(){_pushToFirebase('erecRcptStatus');},450);
   toast('✅ Erection updated: '+dwgRaw+' → '+status);
   renderErecTable();renderDash();
 }
@@ -3765,7 +3769,7 @@ function handleSteelUpload(input){
       showStatus('steelUploadStatus','✅ '+validRows.length+' valid rows found — review preview below, then click PROCESS & APPLY.','ok');
       const btn=document.getElementById('steelProcessBtn');if(btn)btn.style.display='inline-flex';
       renderSteelUploadPreview(validRows);
-    }catch(err){window._uploading=false;showStatus('steelUploadStatus','⚠️ Error reading file: '+err.message,'err');}
+    }catch(err){showStatus('steelUploadStatus','⚠️ Error reading file: '+err.message,'err');}
   };
   reader.readAsBinaryString(file);
 }
@@ -4546,9 +4550,10 @@ function startFbListener(attempt){
 function attachFbListener(key){
   _initFirebase();
   if(!_db||!key)return;
-  // Detach previous listener
-  if(_fbListener){try{_db.ref('projects/'+_fbListener).off('value');}catch(e){}}
+  // Detach previous listener (module SDK uses returned unsubscribe fn)
+  if(typeof _fbUnsubscribe==='function'){try{_fbUnsubscribe();}catch(e){}}
   _fbListener=key;
+  var _fbUnsubscribeFn=null;
 
   _fbOnValueFn('projects/'+key, function(snapshot){
     try{
@@ -4587,7 +4592,7 @@ function attachFbListener(key){
   });
 
   // Show online indicator
-  if(_db)_db.ref('.info/connected').on('value',function(snap){
+  _fbOnValueFn('.info/connected',function(snap){
     const ind=document.getElementById('fbStatusDot');
     const lbl=document.getElementById('fbStatusLbl');
     const connected=snap.val()===true;
@@ -4602,8 +4607,18 @@ window.onload=function(){
   document.getElementById('ownerPhoto').src='data:image/jpeg;base64,'+PHOTO;
   const lLogo2=document.getElementById('lLogo2');
   if(lLogo2)lLogo2.src='data:image/jpeg;base64,'+LOGO;
-  // Start Firebase (compat SDK loads synchronously via CDN)
-  startFbListener();
+  // Firebase module loads asynchronously — listen for it then start
+  if(window._fbReady){
+    // Already loaded (fast connection)
+    startFbListener();
+  } else {
+    // Wait for module to fire firebaseReady event
+    window.addEventListener('firebaseReady',function(){
+      startFbListener();
+    },{once:true});
+    // Fallback: also try after 2 seconds in case event already fired
+    setTimeout(function(){if(!_fbReady) startFbListener();},2000);
+  }
   initProjectScreen();
 };
 </script>
